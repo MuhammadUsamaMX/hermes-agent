@@ -5559,6 +5559,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     "prompt_tokens": usage.get("input_tokens", 0),
                     "completion_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    # Hermes extras. Unknown usage keys are ignored by OpenAI SDK
+                    # clients, and a gateway-backed WebUI session has no other
+                    # channel for the cache/cost split or the compressor's view
+                    # of context size.
+                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "estimated_cost": usage.get("estimated_cost", 0),
+                    "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                    "threshold_tokens": usage.get("threshold_tokens", 0),
                 },
             }
             if finish_reason != "stop":
@@ -7360,10 +7369,22 @@ class APIServerAdapter(BasePlatformAdapter):
                         conversation_history=conversation_history,
                         task_id=effective_task_id,
                     )
+                    _cc = getattr(agent, "context_compressor", None)
                     usage = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                         "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                        # The three above are summed over every API call in the
+                        # turn - a billing total. The compressor fields below are
+                        # the single most recent real prompt, refreshed by
+                        # conversation_loop's update_from_response(); that is what
+                        # a context gauge needs. -1 is the compressor's
+                        # post-compaction sentinel, so clamp to 0.
+                        "cache_read_tokens": getattr(agent, "session_cache_read_tokens", 0) or 0,
+                        "cache_write_tokens": getattr(agent, "session_cache_write_tokens", 0) or 0,
+                        "estimated_cost": getattr(agent, "session_estimated_cost_usd", 0) or 0,
+                        "last_prompt_tokens": max(0, getattr(_cc, "last_prompt_tokens", 0) or 0),
+                        "threshold_tokens": max(0, getattr(_cc, "threshold_tokens", 0) or 0),
                     }
                     # Include the effective session ID in the result so callers
                     # (e.g. X-Hermes-Session-Id header) can track compression-

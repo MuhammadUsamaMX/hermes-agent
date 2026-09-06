@@ -6083,6 +6083,23 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         if gate_error is not None:
             return gate_error
 
+        # Session-model injection for agentteams-service: point its specialist
+        # LLM calls at the user's live session-selected model (the tool's
+        # `model` arg is only a fallback to AGENTTEAMS_DEFAULT_MODEL otherwise),
+        # so a UI model switch propagates to agentteams subagents too. Requires
+        # the agentteams backend to share the main namespace (9route) via
+        # AGENTTEAMS_LITELLM_URL. Only fills an empty model; an explicit wins.
+        if server_name == "agentteams-service" and isinstance(args, dict):
+            try:
+                if not str(args.get("model") or "").strip():
+                    from agent.auxiliary_client import (
+                        _read_main_model_for_aux as _ssm_read,
+                    )
+                    _ssm = _ssm_read()
+                    if _ssm:
+                        args["model"] = _ssm
+            except Exception:
+                pass
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).

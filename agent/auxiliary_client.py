@@ -8367,6 +8367,26 @@ def _resolve_task_provider_model(
                 cfg_api_key = _scoped_key_env(cfg_key_env) or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
+        # ── Session-model enforcement (auxiliary.use_session_model) ──────
+        # When enabled, auxiliary/background tasks inherit the user's live
+        # session-selected model instead of a config-pinned aux model, so a
+        # UI model switch also drives compression, titles, and other aux
+        # calls. An explicit concrete model= (e.g. a MoA slot) still wins; a
+        # missing/"auto" model short-circuits to the session model via the
+        # normal _resolve_auto(main_runtime=…) path. Per-task opt-out:
+        # auxiliary.<task>.use_session_model: false.
+        _explicit_model = bool(model) and str(model).strip().lower() != "auto"
+        if not _explicit_model and task_config.get("use_session_model") is not False:
+            try:
+                from hermes_cli.config import load_config as _load_cfg_ssm
+                _aux_root = (_load_cfg_ssm() or {}).get("auxiliary", {}) or {}
+            except Exception:
+                _aux_root = {}
+            if _aux_root.get("use_session_model"):
+                _sess_model = _read_main_model_for_aux()
+                if _sess_model:
+                    return ("auto", _sess_model, None, None, cfg_api_mode)
+
     # 'auto' is a sentinel meaning "inherit from main runtime / auto-detect", not
     # a literal model id. Without this, a config of `auxiliary.<task>.model: auto`
     # propagates the literal string "auto" to the wire, where the provider returns
