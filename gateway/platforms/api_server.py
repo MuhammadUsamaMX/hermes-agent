@@ -631,7 +631,7 @@ _USAGE_EXTRA_KEYS = (
 )
 
 
-def _chat_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
+def _chat_usage_payload(usage: Dict[str, Any]) -> Dict[str, Union[int, float]]:
     """OpenAI Chat Completions ``usage`` block (prompt/completion/total) from the agent's usage,
     plus the Hermes extras (cache/cost split, compressor's real prompt size) when present."""
     values = (usage.get(key, 0) for key in _USAGE_TOKEN_KEYS)
