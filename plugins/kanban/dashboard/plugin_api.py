@@ -834,6 +834,13 @@ class UpdateTaskBody(BaseModel):
     model_override: Optional[str] = None
     provider_override: Optional[str] = None
     clear_model_override: bool = False
+    # Goal mode configuration — editable only before the task's first run.
+    # ``goal_mode=""`` clears (disables). ``clear_goal_mode=True`` is the
+    # explicit clear signal for the same reason as model_override.
+    goal_mode: Optional[bool] = None
+    goal_max_turns: Optional[int] = None
+    clear_goal_mode: bool = False
+    clear_goal_max_turns: bool = False
 
 
 @router.patch("/tasks/{task_id}")
@@ -928,6 +935,28 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 raise HTTPException(status_code=400, detail=str(e))
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
+
+        # --- goal mode / goal_max_turns ------------------------------------
+        has_goal = payload.goal_mode is not None or payload.clear_goal_mode
+        has_turns = (
+            payload.goal_max_turns is not None or payload.clear_goal_max_turns
+        )
+        if has_goal or has_turns:
+            gm = None
+            if payload.clear_goal_mode:
+                gm = False
+            elif payload.goal_mode is not None:
+                gm = payload.goal_mode
+            gt: object = ...  # sentinel: "not sent"
+            if payload.clear_goal_max_turns:
+                gt = None
+            elif payload.goal_max_turns is not None:
+                gt = payload.goal_max_turns
+            ok, reason = kanban_db.edit_task_goal_config(
+                conn, task_id, goal_mode=gm, goal_max_turns=gt,
+            )
+            if not ok:
+                raise HTTPException(status_code=409, detail=reason)
 
         # --- priority -----------------------------------------------------
         if payload.priority is not None:

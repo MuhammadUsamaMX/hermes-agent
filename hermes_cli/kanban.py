@@ -604,12 +604,26 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     p_edit = sub.add_parser(
         "edit",
-        help="Edit recovery fields on an already-completed task",
+        help="Edit goal mode or recovery fields on a task",
     )
     p_edit.add_argument("task_id")
+    goal_group = p_edit.add_mutually_exclusive_group()
+    goal_group.add_argument(
+        "--goal", action="store_true", dest="goal_mode",
+        help="Enable goal loop for this task (only before first run)",
+    )
+    goal_group.add_argument(
+        "--no-goal", action="store_true", dest="no_goal",
+        help="Disable goal loop for this task (only before first run)",
+    )
+    p_edit.add_argument(
+        "--goal-max-turns", type=int, default=None, dest="goal_max_turns",
+        metavar="N",
+        help="Turn budget for goal workers (only before first run)",
+    )
     p_edit.add_argument(
         "--result",
-        required=True,
+        required=False, default=None,
         help="Backfilled task result text for a done task",
     )
     p_edit.add_argument(
@@ -2239,19 +2253,52 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
+
+    # Determine goal config edits (use ... sentinel so None means "clear").
+    goal_mode = None
+    if getattr(args, "goal_mode", False):
+        goal_mode = True
+    elif getattr(args, "no_goal", False):
+        goal_mode = False
+    goal_max_turns = ...  # type: ignore[assignment]
+    if getattr(args, "goal_max_turns", None) is not None:
+        goal_max_turns = args.goal_max_turns
+
+    has_goal_edit = goal_mode is not None or goal_max_turns is not ...
+    has_result_edit = getattr(args, "result", None) is not None
+
+    if not has_goal_edit and not has_result_edit:
+        print("kanban: edit: nothing to edit (use --goal/--no-goal, --goal-max-turns, or --result)", file=sys.stderr)
+        return 2
+
     with kb.connect_closing() as conn:
-        if not kb.edit_completed_task_result(
-            conn,
-            args.task_id,
-            result=args.result,
-            summary=getattr(args, "summary", None),
-            metadata=metadata,
-        ):
-            print(
-                f"cannot edit {args.task_id} (unknown id or task is not done)",
-                file=sys.stderr,
+        # Goal config edits (pre-execution only).
+        if has_goal_edit:
+            ok, reason = kb.edit_task_goal_config(
+                conn,
+                args.task_id,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
             )
-            return 1
+            if not ok:
+                print(f"kanban: {args.task_id}: {reason}", file=sys.stderr)
+                return 1
+
+        # Result/metadata edits (post-completion).
+        if has_result_edit:
+            if not kb.edit_completed_task_result(
+                conn,
+                args.task_id,
+                result=args.result,
+                summary=getattr(args, "summary", None),
+                metadata=metadata,
+            ):
+                print(
+                    f"cannot edit {args.task_id} (unknown id or task is not done)",
+                    file=sys.stderr,
+                )
+                return 1
+
     print(f"Edited {args.task_id}")
     return 0
 
