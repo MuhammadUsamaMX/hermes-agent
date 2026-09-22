@@ -272,6 +272,41 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // Floating jump button (outside this subtree) → return to the bottom.
   useEffect(() => onScrollToBottomRequest(() => void scrollToBottom()), [scrollToBottom])
 
+  // Guard: pin scrollTop when viewport scrollHeight grows while the reader is
+  // already at the bottom.  use-stick-to-bottom's own ResizeObserver watches
+  // the *content* element, but with content-visibility:auto on older turns the
+  // browser can defer computing their final size — the content rect lags behind
+  // the actual scrollHeight, so the library's resize-follow doesn't fire on
+  // every streaming step.  A ResizeObserver on the *scroll viewport* itself
+  // (which always reflects the true scrollHeight) closes that gap without a
+  // rAF poll loop.
+  const isAtBottomRef = useRef(isAtBottom)
+  isAtBottomRef.current = isAtBottom
+  const prevScrollHeightRef = useRef<number | null>(null)
+  // eslint-disable-next-line no-restricted-syntax -- ResizeObserver callback writes a non-reactive scroll-height sentinel, not an atom mirror
+  useEffect(() => {
+    const el = scrollRef.current
+
+    if (!el) {
+      return
+    }
+
+    const ro = new ResizeObserver(([entry]) => {
+      const sh = (entry.target as HTMLElement).scrollHeight
+      const prev = prevScrollHeightRef.current
+
+      if (prev !== null && sh > prev && isAtBottomRef.current) {
+        el.scrollTop = el.scrollHeight
+      }
+
+      prevScrollHeightRef.current = sh
+    })
+
+    ro.observe(el)
+
+    return () => ro.disconnect()
+  }, [scrollRef])
+
   const endEditHold = useCallback(() => {
     scrollRef.current?.removeAttribute('data-editing')
   }, [scrollRef])
