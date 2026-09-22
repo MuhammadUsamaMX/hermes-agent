@@ -427,6 +427,24 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
                 return state
               }
 
+              // Do NOT clear streamId while a pending streaming bubble still
+              // exists — message.complete is the only event that should retire
+              // it.  On long multi-tool turns, session.info(running=false) can
+              // arrive before message.complete due to WebSocket event ordering.
+              // Clearing streamId here strands the streaming bubble: the
+              // subsequent message.complete can't find it by id, falls through
+              // to the fallback path, and appends a second copy of the final
+              // reply (#118670).
+              if (state.streamId) {
+                const hasPendingAssistant = state.messages.some(
+                  m => m.id === state.streamId && m.role === 'assistant' && m.pending
+                )
+
+                if (hasPendingAssistant) {
+                  return state
+                }
+              }
+
               return {
                 ...state,
                 awaitingResponse: false,

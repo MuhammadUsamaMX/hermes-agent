@@ -311,4 +311,53 @@ describe('useMessageStream interim text sealing', () => {
     await start()
     expect(getState().interimBoundaryPending).toBe(false)
   })
+
+  it('does not lose streamId when session.info(running=false) arrives before message.complete (#118670)', async () => {
+    // Use fake timers so we can control the delta flush timer.
+    vi.useFakeTimers()
+    render(<Harness />)
+    await act(async () => { await Promise.resolve() })
+
+    // Fire message.start
+    act(() => handleEvent!({ payload: {}, session_id: SID, type: 'message.start' }))
+
+    // Fire a delta — queues text on a setTimeout-based flush
+    act(() => handleEvent!({ payload: { text: 'Here is my analysis.' }, session_id: SID, type: 'message.delta' }))
+
+    // Advance past the flush timer so the streaming bubble is created
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+
+    // The streaming bubble is pending with a streamId
+    const stateBefore = getState()
+    expect(stateBefore.streamId).toBeTruthy()
+    const streamBubble = stateBefore.messages.find(
+      m => m.id === stateBefore.streamId && m.role === 'assistant'
+    )
+    expect(streamBubble?.pending).toBe(true)
+
+    // session.info(running=false) arrives BEFORE message.complete —
+    // on long multi-tool turns this can race via WebSocket ordering.
+    // Must NOT clear streamId while the streaming bubble is still pending.
+    act(() =>
+      handleEvent!({
+        payload: { running: false },
+        session_id: SID,
+        type: 'session.info'
+      })
+    )
+
+    const stateAfterSessionInfo = getState()
+    expect(stateAfterSessionInfo.streamId).toBeTruthy()
+    expect(stateAfterSessionInfo.messages.find(
+      m => m.id === stateAfterSessionInfo.streamId && m.role === 'assistant'
+    )?.pending).toBe(true)
+
+    // message.complete now arrives — it MUST find the streaming bubble
+    // and settle it in place (not append a duplicate).
+    act(() => handleEvent!({ payload: { text: 'Here is my analysis.' }, session_id: SID, type: 'message.complete' }))
+
+    const texts = assistantMessages()
+    const matching = texts.filter(t => t.includes('Here is my analysis.'))
+    expect(matching).toHaveLength(1)
+  })
 })
