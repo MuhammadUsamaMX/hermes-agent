@@ -1437,6 +1437,17 @@ def _execute_post_swap(payload: dict, args, gateway_mode: bool) -> None:
     import hermes_cli.update_cmd_config as _cfg
     from hermes_cli.update_inventory import UpdatePlan
 
+    # After the code swap the in-tree plugin catalog may contain new entries that the
+    # live catalog cache (fetched before the pull) does not know about.  Delete it so
+    # the next catalog read refetches from the docs site.  (#119340)
+    try:
+        from hermes_cli.plugin_catalog import _live_cache_path
+        cache = _live_cache_path()
+        if cache.is_file():
+            cache.unlink()
+    except Exception:
+        pass
+
     _cfg._LAST_SIBLING_SNAPSHOTS = dict(payload.get("sibling_snapshots") or {})
     _pre_update_plan = UpdatePlan.from_dict(payload["plan"]) if payload.get("plan") else None
     _windows_gateway_resume = payload.get("windows_gateway_resume")

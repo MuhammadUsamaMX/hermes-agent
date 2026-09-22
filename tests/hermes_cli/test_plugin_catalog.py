@@ -129,6 +129,25 @@ def test_newer_in_tree_pin_outranks_a_fresh_live_cache(tmp_path, monkeypatch):
     assert {e.name: e.sha for e in pc.load_catalog_live()}["shared"] == old
 
 
+def test_newer_in_tree_addition_appears_when_live_lacks_it(tmp_path, monkeypatch):
+    """Fix #119340: an entry present in-tree and absent from the live list must be surfaced when
+    the in-tree catalog is newer (freshly merged but the docs-site mirror has not regen'd yet).
+    When the tree is OLDER the absent entry must NOT appear — the live list is authoritative."""
+    _fresh_cache(tmp_path, monkeypatch, {"generated_at": "2026-09-22T10:00:00Z",
+                                         "entries": [_entry("live-only")], "removed": []})
+    new_in_tree = pc.entry_from_mapping(_entry("fresh-entry", sha="b" * 40), "t")
+    monkeypatch.setattr(pc, "load_catalog", lambda catalog_dir=None: [new_in_tree])
+    bump_time = pc._live_generated_time({"generated_at": "2026-09-22T10:00:00Z"}) + 3600
+    monkeypatch.setattr(pc, "in_tree_catalog_time", lambda: bump_time)
+    by_name = {e.name: e for e in pc.load_catalog_live()}
+    assert "fresh-entry" in by_name, "in-tree addition should appear when tree is newer"
+    assert "live-only" in by_name
+    # Control: older tree must NOT surface the entry absent from live.
+    monkeypatch.setattr(pc, "in_tree_catalog_time", lambda: bump_time - 7200)
+    by_name_old = {e.name: e for e in pc.load_catalog_live()}
+    assert "fresh-entry" not in by_name_old, "absent-from-live entry must not appear when tree is older"
+
+
 def test_live_cache_past_max_stale_age_stops_supplying_pins_but_keeps_removals(tmp_path, monkeypatch):
     """Offline for days: a 25-hour-old cache no longer outranks the in-tree catalog (its pins may be
     older than the checkout's), while its kill-list entries still block."""
