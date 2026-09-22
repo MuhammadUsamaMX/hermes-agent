@@ -4143,6 +4143,32 @@ class APIServerAdapter(BasePlatformAdapter):
             else:
                 finish_reason = "stop"
 
+            # If a plugin hook (e.g. transform_llm_output) modified the response
+            # after streaming finished, the transformed content is in the result
+            # dict but was never streamed as deltas.  Send it as a final content
+            # delta so the client receives the full transformed text.
+            _response_transformed = (
+                bool(result.get("response_transformed"))
+                if isinstance(result, dict) else False
+            )
+            if _response_transformed and finish_reason == "stop":
+                _transformed_text = result.get("final_response") or ""
+                if _transformed_text:
+                    _transform_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": _transformed_text},
+                            "finish_reason": None,
+                        }],
+                    }
+                    await response.write(
+                        f"data: {json.dumps(_transform_chunk)}\n\n".encode()
+                    )
+
             # Finish chunk
             finish_chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
