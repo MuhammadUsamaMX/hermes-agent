@@ -2534,6 +2534,47 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     _rebuild_drifted_tables(conn)
 
+    # Purge phantom task rows left by the t_running bug (#119003).
+    # Must be the very last migration step so all column/index migrations
+    # have already run (phantom rows may have dangling FKs in task_runs
+    # etc. which the cascade-delete handles).
+    # Inlined cleanup to avoid nested write_txn (migration callers may
+    # already hold an open transaction).  Only targets tasks with the
+    # ``t_`` prefix (modern ID format) that fail the hex check — e.g.
+    # ``t_running``, ``t_done``.  Tasks with non-``t_`` IDs (legacy
+    # format) are left alone.
+    phantom_ids = [
+        row["id"] for row in
+        conn.execute("SELECT id FROM tasks WHERE id LIKE 't\\_%' ESCAPE '\\'", ).fetchall()
+        if not _is_valid_task_id(row["id"])
+    ]
+    if phantom_ids:
+        tables = {
+            r[0] for r in
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for pid in phantom_ids:
+            if "task_links" in tables:
+                conn.execute(
+                    "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+                    (pid, pid),
+                )
+            if "task_comments" in tables:
+                conn.execute("DELETE FROM task_comments WHERE task_id = ?", (pid,))
+            if "task_events" in tables:
+                conn.execute("DELETE FROM task_events WHERE task_id = ?", (pid,))
+            if "task_runs" in tables:
+                conn.execute("DELETE FROM task_runs WHERE task_id = ?", (pid,))
+            if "task_attachments" in tables:
+                conn.execute("DELETE FROM task_attachments WHERE task_id = ?", (pid,))
+            if "kanban_notify_subs" in tables:
+                conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM tasks WHERE id = ?", (pid,))
+        _log.warning(
+            "kanban migration: removed %d phantom task row(s): %s",
+            len(phantom_ids), phantom_ids,
+        )
+
 
 # Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or, for
 # ``kanban_notify_subs``, a nullable ``TEXT last_event_id``). The current
@@ -2780,6 +2821,18 @@ def write_txn(conn: sqlite3.Connection):
 # ---------------------------------------------------------------------------
 # ID generation
 # ---------------------------------------------------------------------------
+
+# Valid task ids are ``t_`` followed by exactly 8 hex characters (4 bytes
+# from ``secrets.token_hex(4)``).  Anything else is a phantom — the
+# ``t_running`` bug (issue #119003) produces IDs like ``t_running``
+# which pass a prefix check but fail this regex.
+_VALID_TASK_ID_RE = re.compile(r"^t_[0-9a-f]{8}$")
+
+
+def _is_valid_task_id(task_id: str) -> bool:
+    """Return True if *task_id* matches the canonical ``t_[0-9a-f]{8}`` format."""
+    return bool(_VALID_TASK_ID_RE.match(task_id))
+
 
 def _new_task_id() -> str:
     """Generate a short, URL-safe task id.
@@ -3076,6 +3129,12 @@ def create_task(
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
+        # Defense-in-depth: reject a corrupted ID before it reaches the DB.
+        # Should never fire (token_hex guarantees hex), but prevents any
+        # hypothetical insertion of phantom rows (#119003).
+        assert _is_valid_task_id(task_id), (
+            f"BUG: _new_task_id() returned invalid id {task_id!r}"
+        )
         try:
             with write_txn(conn):
                 # Determine task status from parent status, unless the caller
@@ -4088,6 +4147,13 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
+    # Reject phantom task IDs before any state mutation (#119003).
+    if not _is_valid_task_id(task_id):
+        _log.warning(
+            "kanban: refusing to claim phantom task %r (invalid ID format)",
+            task_id,
+        )
+        return None
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -4211,12 +4277,19 @@ def claim_review_task(
     already claimed (or is not in ``review`` status).
 
     Unlike ``claim_task`` (which handles ``ready -> running``), this
-    does NOT check parent dependencies — the task already passed that
+    does NOT check parent dependencies -- the task already passed that
     gate on its original ``todo -> ready -> running`` transition.
 
     Creates a new run entry so the review agent's lifecycle is tracked
     independently from the original worker run.
     """
+    # Reject phantom task IDs before any state mutation (#119003).
+    if not _is_valid_task_id(task_id):
+        _log.warning(
+            "kanban: refusing to claim phantom review task %r (invalid ID format)",
+            task_id,
+        )
+        return None
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -4724,6 +4797,13 @@ def complete_task(
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
     """
+    # Reject phantom task IDs (#119003).
+    if not _is_valid_task_id(task_id):
+        _log.warning(
+            "kanban: refusing to complete phantom task %r (invalid ID format)",
+            task_id,
+        )
+        return False
     now = int(time.time())
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
@@ -5503,6 +5583,13 @@ def block_task(
     Returns True on any successful transition (to ``blocked``, ``todo``, or
     ``triage``), False when the task wasn't in a blockable state.
     """
+    # Reject phantom task IDs (#119003).
+    if not _is_valid_task_id(task_id):
+        _log.warning(
+            "kanban: refusing to block phantom task %r (invalid ID format)",
+            task_id,
+        )
+        return False
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
@@ -6702,6 +6789,11 @@ class DispatchResult:
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
+    phantom_deleted: list[str] = field(default_factory=list)
+    """Task ids removed this tick because they had malformed IDs that
+    don't match the canonical ``t_[0-9a-f]{8}`` format (issue #119003).
+    Phantom rows like ``t_running`` are cleaned up before any claim/reclaim
+    logic runs so the dispatcher never spawns against a ghost row."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -8059,6 +8151,58 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _sanitize_phantom_tasks(conn: sqlite3.Connection) -> list[str]:
+    """Remove phantom task rows whose IDs are not valid ``t_[0-9a-f]{8}``.
+
+    Issue #119003: under certain multiplexed-gateway race conditions, a
+    malformed row with ``id = 't_running'`` (or similar non-hex suffix)
+    can appear in the tasks table.  These rows have ``status = 'running'``
+    but ``claim_lock = NULL`` / ``worker_pid = NULL`` — a state no
+    legitimate code path produces.  Left alone, the dispatcher picks them
+    up and spawns workers against empty tasks.
+
+    This function runs at the top of every ``_dispatch_once_locked`` tick.
+    It is idempotent and only touches rows with the ``t_`` prefix that
+    fail the hex check — legacy non-``t_`` IDs are left alone.
+    Cascade-deletes event, run, link, comment, attachment, and notify
+    rows so orphaned phantom data never accumulates.
+
+    Returns the list of deleted phantom IDs (for logging / telemetry).
+    """
+    phantoms = conn.execute(
+        "SELECT id FROM tasks WHERE id LIKE 't\\_%' ESCAPE '\\' AND "
+        "length(id) != 10"
+    ).fetchall()
+    # Secondary filter: only IDs that fail the hex check.
+    # The SQL above is the fast pre-filter (avoids regex on every row);
+    # the Python regex catches ``t_running``-style IDs that pass the
+    # length/prefix check but aren't valid hex.
+    to_delete = [
+        row["id"] for row in phantoms
+        if not _is_valid_task_id(row["id"])
+    ]
+    if not to_delete:
+        return []
+    with write_txn(conn):
+        for pid in to_delete:
+            # Cascade-delete in the same txn so we never leave orphans.
+            conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+                (pid, pid),
+            )
+            conn.execute("DELETE FROM task_comments WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM task_attachments WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (pid,))
+            conn.execute("DELETE FROM tasks WHERE id = ?", (pid,))
+        _log.warning(
+            "kanban: removed %d phantom task row(s) with invalid IDs: %s",
+            len(to_delete), to_delete,
+        )
+    return to_delete
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -8176,6 +8320,14 @@ def _dispatch_once_locked(
     reap_worker_zombies()
 
     result = DispatchResult()
+
+    # Purge phantom task rows with malformed IDs (issue #119003).
+    # Must run before any claim/reclaim logic so the dispatcher
+    # never picks up or spawns against a ghost row.
+    phantom_deleted = _sanitize_phantom_tasks(conn)
+    if phantom_deleted:
+        result.phantom_deleted = phantom_deleted
+
     result.reclaimed = release_stale_claims(conn)
     result.stale = detect_stale_running(
         conn, stale_timeout_seconds=stale_timeout_seconds,
