@@ -4,12 +4,16 @@ npm/Desktop rebuilds, self-lock deferral. Names are re-imported by ``update_cmd`
 
 import logging
 from contextlib import suppress
+import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
+from importlib.machinery import all_suffixes as module_suffixes
 from pathlib import Path
 from typing import Optional
 from hermes_constants import project_venv_dir, venv_python_path
@@ -21,12 +25,179 @@ logger = logging.getLogger("hermes_cli.update_cmd")
 # Files defining the editable install; a pull touching none of them cannot invalidate it.
 _INSTALL_DEFINING_FILES = "pyproject.toml", "setup.py", "setup.cfg", "MANIFEST.in", "uv.lock"
 
+# The finder module an active ``__editable__*.pth`` imports (setuptools' name scheme).
+_EDITABLE_FINDER_RE = re.compile(r"__editable___[A-Za-z0-9_]+_finder")
+
+
+def _expected_editable_names(project_root) -> set[str] | None:
+    """Top-level names a fresh editable build of *project_root* maps into its finder.
+
+    Both build-time discovery rules that feed that mapping are mirrored here: root modules
+    come from ``setup.py::_root_py_modules`` (every root ``.py`` except ``setup.py`` — a
+    package finder only sees directories, which is why pyproject carries no static list) and
+    top-level packages from ``[tool.setuptools.packages.find].include``. Against a real
+    ``pip install -e .`` of this tree the two sets match the generated ``MAPPING`` exactly.
+
+    ``None`` when pyproject.toml is missing, unreadable or declares no include list: with no
+    build rule to compare against, the caller must fail closed rather than guess.
+    """
+    root = Path(project_root)
+    try:
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        include = data["tool"]["setuptools"]["packages"]["find"]["include"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(include, (list, tuple)) or not include:
+        return None
+    names = {path.stem for path in root.glob("*.py") if path.name != "setup.py"}
+    for pattern in include:
+        top_level = str(pattern).split(".")[0]
+        if top_level and (root / top_level).is_dir():
+            names.add(top_level)
+    return names
+
+
+def _venv_site_packages(venv_dir) -> Path | None:
+    """site-packages of *venv_dir*: Windows ``Lib``, POSIX/macOS ``lib/pythonX.Y``."""
+    venv_dir = Path(venv_dir)
+    candidates = [venv_dir / "Lib" / "site-packages",
+                  *sorted(venv_dir.glob("lib/python*/site-packages"))]
+    return next((c for c in candidates if c.is_dir()), None)
+
+
+def _editable_target_resolves(target) -> bool:
+    """Whether the editable finder can still reach *target*: a package directory (regular or
+    namespace) or a module under any importlib suffix — the same candidates the generated
+    ``_find_spec`` walks, so a root module mapped without its ``.py`` counts as present."""
+    path = Path(target)
+    if path.is_dir():
+        return True
+    return any(path.with_suffix(suffix).exists() for suffix in module_suffixes())
+
+
+def _editable_pth_is_compat(site_packages: Path) -> bool:
+    """True when the venv's editable install is in compat mode: a ``.pth`` line that puts the
+    checkout itself on ``sys.path`` instead of importing a finder with a name snapshot. Every
+    top-level name then resolves straight from the tree, so there is nothing that could be
+    stale — the comparison in ``_editable_mapping_gaps`` does not apply."""
+    for pth in site_packages.glob("__editable__*.pth"):
+        try:
+            text = pth.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith(("#", "import")) or _EDITABLE_FINDER_RE.search(entry):
+                continue
+            if Path(entry).is_dir():
+                return True
+    return False
+
+
+def _active_editable_targets(site_packages: Path) -> dict[str, list[str]] | None:
+    """``name -> every target path`` the venv's ACTIVE editable finders map it to.
+
+    Only finders an ``__editable__*.pth`` still imports are read: a leftover finder whose
+    ``.pth`` was removed is never imported and must not contribute names, while a leftover
+    that still has its ``.pth`` does resolve (import falls through to it), so the union is
+    what the interpreter actually sees. ``None`` when nothing can be read as a mapping — no
+    ``.pth``, an active finder that is missing or malformed — because "unprovable" is not
+    "covers the checkout".
+    """
+    pth_files = sorted(site_packages.glob("__editable__*.pth"))
+    if not pth_files:
+        return None
+    finder_names: set[str] = set()
+    for pth in pth_files:
+        try:
+            text = pth.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        finder_names.update(_EDITABLE_FINDER_RE.findall(text))
+    if not finder_names:
+        return None
+    targets: dict[str, list[str]] = {}
+    for finder_name in sorted(finder_names):
+        try:
+            tree = ast.parse(
+                (site_packages / f"{finder_name}.py").read_text(
+                    encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError):
+            return None
+        module_maps = _editable_mapping_constants(tree)
+        if module_maps is None:
+            return None
+        for constant in module_maps.values():
+            for top_level, value in constant.items():
+                paths = value if isinstance(value, list) else [value]
+                targets.setdefault(str(top_level), []).extend(str(path) for path in paths)
+    return targets
+
+
+def _editable_mapping_constants(tree) -> dict[str, dict] | None:
+    """Module-level ``MAPPING`` / ``NAMESPACES`` literals of one finder, or ``None`` when it
+    declares neither (or a value we cannot evaluate) — a snapshot we cannot read is not one
+    we can call current."""
+    constants: dict[str, dict] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            bound = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bound = [node.target.id]
+        else:
+            continue
+        for key in ("MAPPING", "NAMESPACES"):
+            if key in bound:
+                if node.value is None:  # bare annotation (``MAPPING: dict``) binds no value
+                    continue
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    return None
+                if not isinstance(value, dict):
+                    return None
+                constants[key] = value
+    return constants or None
+
+
+def _editable_mapping_gaps(project_root) -> list[str] | None:
+    """Top-level names the project venv's editable install cannot import from *project_root*.
+
+    Returns them sorted — empty when the snapshot still covers the checkout — or ``None``
+    when coverage could not be verified at all (no readable discovery rules, no venv
+    site-packages, no readable editable mapping). Callers fail closed on ``None``.
+    """
+    expected = _expected_editable_names(project_root)
+    if expected is None:
+        return None
+    root = Path(project_root)
+    site_packages = _venv_site_packages(project_venv_dir(root) or root / "venv")
+    if site_packages is None:
+        return None
+    if _editable_pth_is_compat(site_packages):
+        # The checkout itself is on sys.path, so no top-level name can be unreachable.
+        return []
+    targets = _active_editable_targets(site_packages)
+    if targets is None:
+        return None
+    return sorted(
+        name for name in expected
+        if not any(_editable_target_resolves(target) for target in targets.get(name, ()))
+    )
+
 
 def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool:
-    """True when the pulled commits cannot have invalidated the editable install: ``uv pip install
-    -e .`` always rewrites console-script shims (Windows: ``hermes.exe`` quarantine, ``os error 32``
-    on a lost race), so skip it when only non-install files changed. Safe because the editable
-    finder uses a *static* module list. Fails closed: no pre-pull SHA or failed diff -> False."""
+    """True when the pulled commits cannot have invalidated the editable install.
+
+    ``uv pip install -e .`` always rewrites console-script shims (Windows: ``hermes.exe``
+    quarantine, ``os error 32`` on a lost race), so it is skipped when only non-install
+    files changed — which is only safe while the venv's editable mapping still exposes every
+    name a fresh build would. That mapping is a build-time snapshot, so a pull adding a root
+    module or package invalidates it while touching no install-defining file at all; skipping
+    then is what left gateways crash-looping on ``hermes_platform`` (#119466).
+
+    Fails closed: no pre-pull SHA, failed diff, or an unprovable mapping -> False.
+    """
     if not pre_pull_sha:
         return False
     try:
@@ -35,7 +206,18 @@ def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool
             cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return result.returncode == 0 and not result.stdout.strip()
+    if result.returncode != 0 or result.stdout.strip():
+        return False
+    gaps = _editable_mapping_gaps(cwd)
+    if gaps is None:
+        return False
+    if gaps:
+        shown = ", ".join(gaps[:8])
+        if len(gaps) > 8:
+            shown += f" (+{len(gaps) - 8} more)"
+        print(f"→ Editable install is stale — venv import map is missing: {shown}")
+        return False
+    return True
 
 
 # Modules imported on every startup. Unlike _UPDATE_CRITICAL_FILES (only parsed) these are
