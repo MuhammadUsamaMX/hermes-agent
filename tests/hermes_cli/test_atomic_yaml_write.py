@@ -34,6 +34,20 @@ class TestAtomicYamlWrite:
         assert yaml.safe_load(target.read_text(encoding="utf-8")) == original
 
 
+    def test_long_backslash_scalar_survives_write_then_read(self, tmp_path):
+        """The document on disk reloads equal to what was handed to the writer (#119844).
+
+        The emitter folds long scalars at column 80; a fold right after an escaped backslash
+        (or inside a run of spaces) reloads with an extra space, so a write silently changes
+        the stored value while the file still parses.
+        """
+        target = tmp_path / "manifest.yaml"
+        value = "A" * 76 + "\\" + "CentBrowserPortable " + "B" * 40 + "\nsecond"
+
+        atomic_yaml_write(target, {"description": value})
+
+        assert yaml.safe_load(target.read_text(encoding="utf-8")) == {"description": value}
+
     def test_writes_unicode_unescaped_and_round_trips(self, tmp_path):
         """Emoji/kaomoji are written as real UTF-8, not fragile escape sequences.
 

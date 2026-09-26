@@ -61,7 +61,32 @@ def safe_dump(
     allow_unicode: bool = True,
     width: int = 80,
 ) -> str | None:
-    """Write standard YAML data with readable Unicode and indented block lists."""
+    """Write standard YAML data with readable Unicode and indented block lists.
+
+    Every caller persists this text and reads it back, so the document must parse to the data it
+    was given: a fold at *width* that would change a value is re-emitted unfolded (see
+    ``ROUNDTRIP_YAML_WIDTH``). ``width`` is therefore a wrapping hint, not a guarantee.
+    """
+    text = _emit(data, default_flow_style=default_flow_style, sort_keys=sort_keys,
+                 allow_unicode=allow_unicode, width=width)
+    if _reads_back_differently(text, data):
+        # The fold, not the data, changed what the document means — emit again without folding.
+        text = _emit(data, default_flow_style=default_flow_style, sort_keys=sort_keys,
+                     allow_unicode=allow_unicode, width=ROUNDTRIP_YAML_WIDTH)
+    if stream is not None:
+        stream.write(text)
+        return None
+    return text
+
+
+def _emit(
+    data: Any,
+    *,
+    default_flow_style: bool,
+    sort_keys: bool,
+    allow_unicode: bool,
+    width: int,
+) -> str:
     # The C emitter ignores sequence offsets and escapes astral Unicode.
     yaml = YAML(typ="safe", pure=True)
     yaml.Resolver = _Yaml11Resolver
@@ -70,19 +95,29 @@ def safe_dump(
     yaml.width = width
     yaml.sort_base_mapping_type_on_output = sort_keys
     yaml.indent(mapping=2, sequence=4, offset=2)
-    if stream is not None:
-        yaml.dump(data, stream)
-        return None
     output = StringIO()
     yaml.dump(data, output)
     return output.getvalue()
 
 
+def _reads_back_differently(text: str, data: Any) -> bool:
+    """True when re-parsing our own output would not give the caller's data back."""
+    try:
+        return safe_load(text) != data
+    except YAMLError:
+        # Our own document does not parse: let the unfolded emission have a go, then accept
+        # whatever it produces rather than failing a writer that never failed before.
+        return True
+
+
 # ruamel's emitter can change a double-quoted value when it folds a long line right after an
 # escaped backslash (``D:\\Cent…`` → ``D:\\`` + bare newline): the fold reloads as a literal space
-# and a no-op save mutates the stored value (#119844). Config writes must be value-preserving, so
-# every round-trip emitter in the tree keeps scalars on one line instead of folding (``None``
-# does NOT disable folding on 0.18.x; only a large width does).
+# and a no-op save mutates the stored value (#119844). The same fold inside a run of spaces in a
+# plain scalar collapses ``two spaces`` to one, so the corruption is not double-quoted-specific.
+# Config writes must be value-preserving, so no emitter in the tree may fold when folding would
+# change what a reader gets back: ``roundtrip_yaml()`` never folds (``None`` does NOT disable
+# folding on 0.18.x; only a large width does), and ``safe_dump`` re-emits unfolded when its own
+# output does not read back as the data it was given.
 ROUNDTRIP_YAML_WIDTH = 2**31 - 1
 
 

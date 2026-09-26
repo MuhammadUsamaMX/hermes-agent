@@ -51,6 +51,35 @@ def test_safe_dump_honors_the_options_used_by_callers():
     assert yaml.safe_load(flow) == data
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Fold lands right after an escaped backslash inside a double-quoted scalar: the reader
+        # folds that break back into a literal space, so the stored value gains characters.
+        "A" * 76 + "\\" + "CentBrowserPortable " + "B" * 40 + "\nsecond",
+        # Fold lands inside a run of spaces in a plain scalar: the reader keeps a single space.
+        "w" * 40 + "  " + "x" * 40,
+    ],
+    ids=["double_quoted_fold_after_backslash", "plain_scalar_fold_inside_spaces"],
+)
+def test_safe_dump_reads_back_the_values_it_was_given(value):
+    """`safe_dump` writes documents that `safe_load` parses back unchanged (#119844).
+
+    Folding a long scalar can change the value it reloads as, which silently mutates any file
+    this writer persists: profile.yaml, skins, import/distribution manifests, plugin packs,
+    skill bundles, blueprint frontmatter and the iron-proxy config.
+    """
+    assert yaml.safe_load(yaml.safe_dump({"k": value})) == {"k": value}
+
+
+def test_safe_dump_still_folds_scalars_that_survive_the_fold():
+    """Value preservation must not cost readable wrapping when folding is lossless."""
+    value = " ".join(["word"] * 40)  # well past the 80-column fold point, folded only at spaces
+    text = yaml.safe_dump({"k": value})
+    assert yaml.safe_load(text) == {"k": value}
+    assert len(text.splitlines()) > 1
+
+
 def test_roundtrip_preserves_comments_quotes_and_scalar_types():
     editor = yaml.roundtrip_yaml()
     original = '# keep this\nname: "hello 🦀"  # note\nflag: off\n'
