@@ -3,6 +3,8 @@
 import threading
 import time
 
+import pytest
+
 from agent import periodic_scheduler
 from agent.periodic_scheduler import PeriodicScheduler, schedule
 
@@ -153,3 +155,32 @@ def test_worker_start_failure_keeps_timer(monkeypatch):
         assert not handle.cancelled
     finally:
         handle.cancel(wait=1.0)
+
+
+def test_schedule_rejects_zero_negative_and_non_finite_intervals():
+    """#119219: an interval <= 0 (or NaN/inf) makes the requeued deadline already
+    due, so the shared thread would run the callback back-to-back forever."""
+    for bad in (0, 0.0, -1, -0.5, float("nan"), float("inf"), float("-inf")):
+        sched = PeriodicScheduler()
+        with pytest.raises(ValueError):
+            sched.schedule(lambda: None, bad)
+        # Rejected before any side effect: no heap entry, no scheduler thread.
+        assert sched._heap == []
+        assert sched._thread is None
+
+
+def test_schedule_rejects_invalid_interval_via_module_level_schedule(monkeypatch):
+    default = PeriodicScheduler()
+    monkeypatch.setattr(periodic_scheduler, "_DEFAULT", default)
+    with pytest.raises(ValueError):
+        schedule(lambda: None, 0)
+    with pytest.raises(ValueError):
+        schedule(lambda: None, float("-inf"))
+    assert default._heap == [] and default._thread is None
+
+
+def test_valid_intervals_still_schedule_after_validation():
+    sched = PeriodicScheduler()
+    handle = sched.schedule(lambda: None, 1e-6)
+    assert handle._interval == pytest.approx(1e-6)
+    handle.cancel(wait=1.0)
