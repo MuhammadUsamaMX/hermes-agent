@@ -13,6 +13,7 @@ Covers the three seams the integration relies on:
 """
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -72,6 +73,11 @@ def _fake_cli(tmp_path, body):
     return str(script)
 
 
+def _pinned_uvx_argv(uvx_path):
+    """Expected ``_find_cli()`` argv for the zero-install fallback: pinned spec, #120015."""
+    return [uvx_path, "--from", bu_cli.BU_UVX_SPEC, "browser-use"]
+
+
 class TestModeDetection:
     def test_default_on_when_cli_available(self, monkeypatch):
         """Backend unset: Browser Use mode is the default when the CLI runs."""
@@ -123,6 +129,44 @@ class TestModeDetection:
         monkeypatch.setattr("hermes_cli.config.read_raw_config", boom)
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
+
+    def test_explicit_cdp_url_selects_built_in_stack(self, monkeypatch):
+        """#120015: ``browser.cdp_url`` IS the operator choosing the built-in stack, so the
+        default backend must not activate Browser Use through the uvx fallback on top of
+        an endpoint the built-in tools are meant to drive."""
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"cdp_url": "http://localhost:9222"}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/local/bin/uvx", "browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is False
+
+    def test_cdp_connect_env_selects_built_in_stack(self, monkeypatch):
+        """``/browser connect`` exports BROWSER_CDP_URL — same operator choice, same answer."""
+        monkeypatch.setenv("BROWSER_CDP_URL", "http://localhost:9222")
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/local/bin/uvx", "browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is False
+
+    def test_explicit_backend_wins_over_cdp_url(self, monkeypatch):
+        """``backend: browser-use`` is an explicit choice of the mode: browser_exec drives the
+        configured endpoint itself (``_resolve_backend_cdp``), so it keeps the mode."""
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"cdp_url": "http://localhost:9222", "backend": "browser-use"}},
+        )
+        assert bu_cli.is_browser_use_cli_mode() is True
+
+    def test_default_without_cdp_url_still_prefers_cli(self, monkeypatch):
+        """No endpoint configured → the pre-#120015 default is unchanged."""
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config", lambda: {"browser": {"cdp_url": ""}}
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is True
 
 
 class TestSubprocessEnvironment:
@@ -221,6 +265,28 @@ class TestToolSurfaceSwap:
         assert bt_install.check_browser_requirements() is False
         assert bt_install.check_browser_vision_requirements() is False
 
+    def test_cdp_url_keeps_built_in_tools_when_backend_unset(self, monkeypatch):
+        """#120015 repro: uvx-only host (browser-use not installed), ``browser.cdp_url``
+        set, ``browser.backend`` unset → the built-in browser_* surface must stay
+        advertised instead of being dropped wholesale for ``browser_exec``."""
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"cdp_url": "http://localhost:9222"}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/local/bin/uvx", "browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is False
+        assert bt_install.check_browser_requirements() is True
+
+    def test_uvx_only_default_without_cdp_url_still_swaps_surface(self, monkeypatch):
+        """The other half of #120015 stays as designed: with no endpoint configured the
+        default backend still selects Browser Use, so the swap is an explicit choice."""
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/local/bin/uvx", "browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is True
+        assert bt_install.check_browser_requirements() is False
+
     def test_browser_exec_registered_with_mode_check(self):
         from tools.registry import registry
 
@@ -317,7 +383,17 @@ class TestFindCli:
             bu_cli.shutil, "which",
             lambda name, path=None: "/usr/local/bin/uvx" if name == "uvx" and path is None else None,
         )
-        assert bu_cli._find_cli_unpatched() == ["/usr/local/bin/uvx", "browser-use"]
+        assert bu_cli._find_cli_unpatched() == _pinned_uvx_argv("/usr/local/bin/uvx")
+
+    def test_uvx_fallback_is_pinned_to_a_tested_release(self, monkeypatch):
+        """#120015: the zero-install run must fetch a pinned release, never whatever PyPI
+        serves at tool-call time."""
+        monkeypatch.setattr(
+            bu_cli.shutil, "which",
+            lambda name, path=None: "/usr/local/bin/uvx" if name == "uvx" and path is None else None,
+        )
+        assert re.fullmatch(r"browser-use==\d+\.\d+\.\d+", bu_cli.BU_UVX_SPEC), bu_cli.BU_UVX_SPEC
+        assert bu_cli._find_cli_unpatched() == ["/usr/local/bin/uvx", "--from", bu_cli.BU_UVX_SPEC, "browser-use"]
 
     def test_none_when_neither_available(self, monkeypatch):
         monkeypatch.setattr(bu_cli.shutil, "which", lambda name, path=None: None)
@@ -1072,7 +1148,7 @@ class TestFindCliManagedBin:
         uvx = bin_dir / "uvx"
         uvx.write_text("#!/bin/sh\n", encoding="utf-8")
         uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
-        assert bu_cli._find_cli_unpatched() == [str(uvx), "browser-use"]
+        assert bu_cli._find_cli_unpatched() == _pinned_uvx_argv(str(uvx))
 
     def test_nothing_found(self, tmp_path, monkeypatch):
         assert bu_cli._find_cli_unpatched() is None
@@ -1126,7 +1202,7 @@ class TestFindCliManagedBin:
         uvx = cli_dir / "uvx"
         uvx.write_text("#!/bin/sh\n", encoding="utf-8")
         uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
-        assert bu_cli._find_cli_unpatched() == [str(uvx), "browser-use"]
+        assert bu_cli._find_cli_unpatched() == _pinned_uvx_argv(str(uvx))
 
 
 class TestInstallCli:
@@ -1248,6 +1324,92 @@ class TestDefaultDowngradeNotice:
         )
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.default_downgrade_notice() is None
+
+    def test_no_downgrade_notice_when_cdp_url_configured(self, tmp_path, monkeypatch):
+        """#120015: a configured endpoint is a deliberate choice of the built-in stack, not a
+        downgrade — the CLI-missing notice must stay silent for it."""
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"cdp_url": "http://localhost:9222"}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert bu_cli.default_downgrade_notice() is None
+
+
+class TestUvxFallbackNotice:
+    """#120015: the mirror of ``default_downgrade_notice()`` — when the DEFAULT backend
+    selected Browser Use only because ``uvx`` can fetch it (browser-use itself is not
+    installed), say so once: the whole built-in ``browser_*`` surface, ``browser_vision``
+    included, is hidden for the rest of the run."""
+
+    def _isolate(self, tmp_path, monkeypatch, config=None):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: config or {})
+
+    @staticmethod
+    def _uvx_cmd():
+        return _pinned_uvx_argv("/usr/local/bin/uvx")
+
+    def test_notice_when_default_resolved_through_uvx(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", self._uvx_cmd)
+        notice = bu_cli.uvx_fallback_notice()
+        assert notice is not None
+        assert "uvx" in notice
+        assert "browser.backend: off" in notice
+        assert "browser_vision" in notice
+
+    def test_no_notice_when_browser_use_is_installed(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        assert bu_cli.uvx_fallback_notice() is None
+
+    def test_no_notice_when_no_cli_at_all(self, tmp_path, monkeypatch):
+        """That case already has ``default_downgrade_notice()`` — never print both."""
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert bu_cli.uvx_fallback_notice() is None
+
+    def test_no_notice_with_cdp_url(self, tmp_path, monkeypatch):
+        self._isolate(
+            tmp_path, monkeypatch, {"browser": {"cdp_url": "http://localhost:9222"}}
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", self._uvx_cmd)
+        assert bu_cli.uvx_fallback_notice() is None
+
+    def test_no_notice_on_explicit_backend(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch, {"browser": {"backend": "browser-use"}})
+        monkeypatch.setattr(bu_cli, "_find_cli", self._uvx_cmd)
+        assert bu_cli.uvx_fallback_notice() is None
+
+    def test_no_notice_when_migrating_a_legacy_cloud_config(self, tmp_path, monkeypatch):
+        """A pre-CLI BROWSER_USE_API_KEY config is an explicit Browser Use choice too."""
+        self._isolate(tmp_path, monkeypatch, {"browser": {"cloud_provider": "browser-use"}})
+        monkeypatch.setenv("BROWSER_USE_API_KEY", "bu-key")
+        monkeypatch.setattr(bu_cli, "_find_cli", self._uvx_cmd)
+        assert bu_cli.uvx_fallback_notice() is None
+
+    def test_rate_limited_within_24h(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", self._uvx_cmd)
+        assert bu_cli.uvx_fallback_notice() is not None
+        assert bu_cli.uvx_fallback_notice() is None
+
+
+class TestUvxFallbackDetection:
+    def test_installed_binary_is_not_the_fallback(self):
+        assert bu_cli._is_uvx_fallback(["/usr/bin/browser-use"]) is False
+        assert bu_cli._is_uvx_fallback(None) is False
+        assert bu_cli._is_uvx_fallback([]) is False
+
+    def test_uvx_argv_is_the_fallback(self):
+        assert bu_cli._is_uvx_fallback(["/usr/local/bin/uvx", "browser-use"]) is True
+
+    def test_windows_uvx_shim_is_the_fallback(self):
+        assert bu_cli._is_uvx_fallback([r"C:\uv\uvx.exe", "--from", "browser-use", "browser-use"]) is True
 
 
 class TestLightpandaBackendResolution:

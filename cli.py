@@ -969,11 +969,12 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             pass  # never block startup
 
     def _show_browser_backend_notice(self):
-        """Once-per-24h hint when the default Browser Use backend silently fell back to built-in tools."""
+        """Once-per-24h hint when the default Browser Use backend silently fell back to built-in tools,
+        or activated only through the zero-install ``uvx`` fallback (#120015) — mutually exclusive cases."""
         try:
-            from tools.browser_use_cli import default_downgrade_notice
+            from tools.browser_use_cli import default_downgrade_notice, uvx_fallback_notice
 
-            notice = default_downgrade_notice()
+            notice = default_downgrade_notice() or uvx_fallback_notice()
             if notice:
                 from gateway.warning_notifications import render_notification
                 render_notification(lambda: self._console_print(f"[yellow]⚠ {notice}[/yellow]"), platform="cli")
