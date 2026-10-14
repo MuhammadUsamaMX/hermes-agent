@@ -10,6 +10,8 @@ both with the documented shape, so a plugin TypeError aborted
 
 import asyncio
 
+import pytest
+
 from gateway.plugin_dispatch import connect_adapter, invoke_setup_fn
 
 
@@ -127,3 +129,45 @@ def test_connect_omits_the_kwarg_for_an_uninspectable_signature():
         connect = bool
 
     assert connect_adapter(Adapter(), is_reconnect=True) is False
+
+
+# ── _legacy_setup_config ────────────────────────────────────────────────────
+# The wizard must hand a legacy setup_fn(config) the same block the gateway will
+# load on restart, whichever spelling the user wrote it in.
+
+
+@pytest.fixture()
+def _writable_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    return tmp_path
+
+
+def _write_cfg(home, yaml_text):
+    (home / "config.yaml").write_text(yaml_text, encoding="utf-8")
+
+
+@pytest.mark.parametrize("yaml_text", [
+    # The spelling `hermes config set gateway.platforms.keet...` writes.
+    "gateway:\n  platforms:\n    keet:\n      enabled: true\n      token: TOK\n",
+    # The top-level spelling.
+    "platforms:\n  keet:\n    enabled: true\n    token: TOK\n",
+    # Both, split across spellings — the merge must still find them.
+    "gateway:\n  platforms:\n    keet:\n      enabled: true\nplatforms:\n  keet:\n      token: TOK\n",
+])
+def test_legacy_setup_config_sees_the_block_the_gateway_will_load(_writable_home, yaml_text):
+    """A legacy setup_fn gating on config.enabled must not see a platform the user
+    configured through `gateway.platforms.<key>` as disabled (#97065)."""
+    from hermes_cli.gateway_setup_wizard import _legacy_setup_config
+
+    _write_cfg(_writable_home, yaml_text)
+    cfg = _legacy_setup_config({"key": "keet"})
+    assert cfg.enabled is True
+    assert cfg.token == "TOK"
+
+
+def test_legacy_setup_config_defaults_when_the_platform_is_unset(_writable_home):
+    from hermes_cli.gateway_setup_wizard import _legacy_setup_config
+
+    _write_cfg(_writable_home, "model:\n  default: x\n")
+    cfg = _legacy_setup_config({"key": "keet"})
+    assert cfg.enabled is False

@@ -6,11 +6,14 @@ intercepting the moved code.
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
 from hermes_cli.setup import print_success  # def-time binding (table value)
 from hermes_cli.setup import print_warning  # def-time binding (table value)
+
+logger = logging.getLogger(__name__)
 
 
 def _gw():
@@ -713,18 +716,28 @@ def _builtin_setup_fn(key: str):
 def _legacy_setup_config(platform: dict):
     """``PlatformConfig`` for a plugin's legacy ``setup_fn(config)`` (#97065).
 
-    The platform's own ``platforms.<key>`` block from the merged config (defaults when
-    unset) — the same type ``adapter_factory``/``validate_config`` receive. Built lazily
-    by ``invoke_setup_fn`` so the documented ``setup_fn()`` path never loads config.
+    Read the way the gateway reads it: ``merge_platform_sections`` folds ``gateway.platforms.<key>``,
+    the top-level ``platforms.<key>`` block and ``gateway.<key>`` subsections into one block and
+    stamps ``extra._enabled_explicit``. Reading a single spelling (as ``load_config()["platforms"]``
+    does) hands a plugin configured through ``gateway.platforms.<key>`` a default-constructed
+    config — ``enabled=False``, no token — so the wizard would write a config that disagrees with
+    the one the gateway loads on restart. ``gateway/relay/__init__.py`` reads a plugin block the
+    same way.
     """
     from gateway.config import PlatformConfig
+    from gateway.config_loader import merge_platform_sections, read_yaml_layers
+    from hermes_constants import get_hermes_home
 
     try:
-        from hermes_cli.config import load_config
-        block = load_config().get("platforms", {}).get(platform["key"], {})
-        return PlatformConfig.from_dict(block if isinstance(block, dict) else {})
+        cfg = read_yaml_layers(get_hermes_home())
+        if not isinstance(cfg, dict):
+            return PlatformConfig()
+        gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+        block = merge_platform_sections(cfg, gateway, {}).get(platform["key"], {})
     except Exception:
+        logger.warning("Could not read the %s platform config for setup_fn", platform["key"], exc_info=True)
         return PlatformConfig()
+    return PlatformConfig.from_dict(block if isinstance(block, dict) else {})
 
 
 def _configure_platform(platform: dict) -> None:
