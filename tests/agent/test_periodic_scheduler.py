@@ -184,3 +184,16 @@ def test_valid_intervals_still_schedule_after_validation():
     handle = sched.schedule(lambda: None, 1e-6)
     assert handle._interval == pytest.approx(1e-6)
     handle.cancel(wait=1.0)
+
+
+def test_rejected_interval_leaves_scheduler_usable():
+    """One refused call must not poison the scheduler for later, valid ones."""
+    sched = PeriodicScheduler()
+    with pytest.raises(ValueError):
+        sched.schedule(lambda: None, -1)
+    fired: list = []
+    handle = sched.schedule(lambda: fired.append(1) or None, 0.01)
+    try:
+        assert _wait_until(lambda: fired), "scheduler stayed dead after a rejected schedule()"
+    finally:
+        handle.cancel(wait=1.0)
