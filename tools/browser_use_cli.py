@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 _BACKEND_KEY = "browser-use"
 BACKEND_DISABLED = "off"
 
+# Zero-install fallback spec (#120015): ``uvx --from browser-use==<tested> browser-use`` must fetch the
+# release Hermes tested, never whatever PyPI happens to serve at tool-call time. Bump deliberately,
+# after running the browser suite against the new release.
+BU_UVX_SPEC = "browser-use==0.13.10"
+
 # Cloud daemon names become the BU_NAME env var
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -213,34 +218,89 @@ def is_legacy_browser_use_cloud_config(browser_cfg: dict) -> bool:
     return bool(get_secret("BROWSER_USE_API_KEY", ""))
 
 
+def _configured_cdp_override() -> str:
+    """The *configured* CDP endpoint (``browser.cdp_url`` / ``BROWSER_CDP_URL``), or ``""``.
+
+    Raw read — no ``/json/version`` probe, never raises: mode detection runs during schema build,
+    where a stale endpoint must not cost a blocking call (#120015)."""
+    return _quiet(
+        lambda: importlib.import_module("tools.browser_tool_cdp")._get_cdp_override_raw() or "",
+        "", "CDP override lookup failed",
+    )
+
+
 def is_browser_use_cli_mode() -> bool:
     """True when the Browser Use CLI replaces the built-in browser stack. Browser Use mode is the DEFAULT:
     unset ``browser.backend`` ("") enables it whenever the CLI is runnable (installed binary or uvx);
     ``browser.backend: off`` keeps the built-in browser_* tools. Camofox always falls back to the built-in
-    tools (Firefox, custom HTTP API, no CDP surface for the harness)."""
+    tools (Firefox, custom HTTP API, no CDP surface for the harness).
+
+    The one exception (#120015): a configured CDP endpoint (``browser.cdp_url``, or ``BROWSER_CDP_URL``
+    exported by ``/browser connect``) IS the operator choosing the built-in stack — it is the endpoint
+    ``browser_vision`` and friends are meant to drive, and ``check_browser_requirements()`` already
+    honours it a few lines below. Activating Browser Use on top of it (through the uvx fallback) silently
+    dropped that whole surface. An explicit ``browser.backend: browser-use`` still wins: ``browser_exec``
+    drives the same endpoint itself."""
     if _camofox_active():
         return False
     backend = get_browser_backend()
-    return backend == _BACKEND_KEY if backend else (is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None)
+    if backend:
+        return backend == _BACKEND_KEY
+    if _configured_cdp_override():
+        return False
+    return is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None
+
+
+def _notice_allowed(stamp_name: str) -> bool:
+    """Rate-limit a startup notice to once per 24h via a stamp file in ``$HERMES_HOME/cache``;
+    stamps on first (allowed) call. An unwritable home stays allowed — a notice must never break startup."""
+    stamp = Path(get_hermes_home()) / "cache" / stamp_name
+    with contextlib.suppress(OSError):
+        if 0 <= time.time() - stamp.stat().st_mtime < 24 * 3600:
+            return False
+    with contextlib.suppress(OSError):
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    return True
 
 
 def default_downgrade_notice() -> Optional[str]:
     """One-line notice when ``browser.backend`` is unset but the CLI is not runnable, so
     the session fell back to the built-in tools. Rate-limited to once per 24h via a stamp file."""
     try:
-        if get_browser_backend() or _camofox_active() or _find_cli() is not None:
-            return None  # explicit choice / Camofox / CLI present — nothing downgraded
-        stamp = Path(get_hermes_home()) / "cache" / ".browser_use_default_notice"
-        with contextlib.suppress(OSError):
-            if 0 <= time.time() - stamp.stat().st_mtime < 24 * 3600:
-                return None
-        with contextlib.suppress(OSError):
-            stamp.parent.mkdir(parents=True, exist_ok=True)
-            stamp.touch()
+        if get_browser_backend() or _camofox_active() or _find_cli() is not None or _configured_cdp_override():
+            return None  # explicit choice / endpoint / Camofox / CLI present — nothing downgraded
+        if not _notice_allowed(".browser_use_default_notice"):
+            return None
         return ("Browser Use CLI not found — using the built-in browser tools. Run `hermes tools` "
                 "(Browser Automation → Browser Use) to install it, or `browser.backend: off` in config.yaml to silence this.")
     except Exception as e:  # pragma: no cover — a notice must never break startup
         logger.debug("browser-use downgrade notice failed: %s", e)
+        return None
+
+
+def uvx_fallback_notice() -> Optional[str]:
+    """One-line notice when the DEFAULT backend picked Browser Use only through the zero-install
+    ``uvx`` fallback (browser-use itself is not installed): the built-in ``browser_*`` tools,
+    ``browser_vision`` included, are hidden from then on and nothing else said so (#120015).
+
+    Mutually exclusive with :func:`default_downgrade_notice` — that one covers the CLI being *missing*,
+    this one the CLI being *fetched*. Rate-limited to once per 24h via its own stamp file."""
+    try:
+        if get_browser_backend() or _camofox_active() or _configured_cdp_override():
+            return None  # explicit choice / endpoint / Camofox — not the uvx default
+        if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
+            return None  # a pre-CLI BROWSER_USE_API_KEY config is an explicit Browser Use choice too
+        if not _is_uvx_fallback(_find_cli()):
+            return None  # installed binary (fine) or no CLI at all (default_downgrade_notice's case)
+        if not _notice_allowed(".browser_use_uvx_notice"):
+            return None
+        return ("Browser Use mode is active only through the zero-install `uvx` fallback "
+                "(browser-use is not installed), so the built-in browser_* tools — browser_vision "
+                "included — are unavailable. Set `browser.backend: off` in config.yaml to keep them, "
+                "or run `hermes tools` (Browser Automation → Browser Use) to install the CLI.")
+    except Exception as e:  # pragma: no cover — a notice must never break startup
+        logger.debug("browser-use uvx fallback notice failed: %s", e)
         return None
 
 
@@ -253,19 +313,35 @@ def _find_cli() -> Optional[List[str]]:
     """Locate the browser-use CLI, or None when it can't be run. MANAGED-FIRST: Hermes' own ``$HERMES_HOME/bin``
     copy always wins so every session drives one Hermes-controlled binary; PATH and the user-level tool dir
     (~/.local/bin, or uv's %APPDATA%/uv/bin on Windows — Desktop/TUI workers may start with a minimal PATH
-    that omits it) are fallbacks; uvx zero-install (same probe order) is last."""
+    that omits it) are fallbacks; uvx zero-install (same probe order) is last, pinned to ``BU_UVX_SPEC``
+    so a tool-call never fetches an untested release from PyPI (#120015)."""
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         user_bin = str(Path(appdata) / "uv" / "bin") if appdata else None
     else:
         user_bin = str(Path(os.path.expanduser("~")) / ".local" / "bin")
     probe_paths = [p for p in (_managed_bin_dir(), None, user_bin) if p is None or p]  # None = PATH
-    for name, argv in (("browser-use", lambda b: [b]), ("uvx", lambda b: [b, "browser-use"])):
+    for name, argv in (
+        ("browser-use", lambda b: [b]),
+        ("uvx", lambda b: [b, "--from", BU_UVX_SPEC, "browser-use"]),
+    ):
         for probe_path in probe_paths:
             found = shutil.which(name, path=probe_path)
             if found:
                 return argv(found)
     return None
+
+
+def _is_uvx_fallback(cmd: Optional[List[str]]) -> bool:
+    """True when ``cmd`` is the zero-install ``uvx`` run rather than an installed binary.
+
+    A resolved ``browser-use`` binary is a one-element argv, so anything else that starts with an
+    ``uvx`` executable is the fallback — the difference that decides whether Browser Use mode is
+    *installed* or merely *fetchable* (#120015)."""
+    if not cmd or len(cmd) < 2:
+        return False
+    # Separator-normalized so a Windows uvx.exe argv still resolves to its basename on POSIX.
+    return os.path.basename(str(cmd[0]).replace("\\", "/")).lower().startswith("uvx")
 
 
 def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
