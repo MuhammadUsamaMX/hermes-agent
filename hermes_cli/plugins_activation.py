@@ -93,12 +93,14 @@ def find_activation(summaries: Optional[list[dict[str, Any]]], name: str) -> Opt
     return None
 
 
-def _handler_wiring(answer: Optional[Dict[str, Any]]) -> tuple:
+def _handler_wiring(answer: Optional[dict[str, Any]]) -> tuple:
     """``(status, failures)`` for the gateway's ``reload-plugins`` answer: ``"confirmed"`` only when
     the gateway read its live adapters back and none reported an unwired handler factory,
     ``"failed"`` when it did and some did, ``"unconfirmed"`` for no answer, a loop timeout, or a
     gateway that predates the wiring receipt (#119502)."""
-    if not answer or answer.get("reloaded") is not True or answer.get("adapters_rewired") is None:
+    if (not answer or answer.get("reloaded") is not True or answer.get("adapters_rewired") is None
+            or "handler_wiring_failures" not in answer):
+        # an int `adapters_rewired` without the receipt key comes from a pre-#119502 gateway: it only counted objects
         return "unconfirmed", []
     failures = sorted(str(f) for f in (answer.get("handler_wiring_failures") or ()))
     if failures:
@@ -264,7 +266,7 @@ def activation_hint(result: dict[str, Any]) -> str:
             return "\n".join(lines)
         return "\n".join([*lines, "Restart the gateway for the plugin to take effect:\n  hermes gateway restart"])
     now, deferred = act.get("activated_now") or {}, act.get("deferred") or {}
-    labels: Dict[str, str] = {"tools": "tools (next session)", "prompt": "system prompt (next session)",
+    labels: dict[str, str] = {"tools": "tools (next session)", "prompt": "system prompt (next session)",
                               "mcp_servers": "MCP servers (next session)"}
     if result.get("handler_wiring") != "confirmed":
         # #119502: the rescan was acknowledged, but the wiring was not — never say "active now".
