@@ -190,3 +190,93 @@ class TestSafetyValves:
         assert helper("plain text with nothing to hide") == (
             "plain text with nothing to hide"
         )
+
+
+class TestMultiplexCandidateOwnership:
+    """#77162 P2: exact-value candidates follow the ROUTED profile's secret scope,
+    not the launcher's ``os.environ``.
+
+    In a multiplex process the launcher profile A's ``SERVICE_TOKEN`` must never
+    become a mask candidate (or an applied value) while serving profile B, and
+    B's own opaque value must be present. A single-profile deployment (no scope,
+    multiplex off) keeps the env scan — that is where systemd/``op run`` inject
+    credentials.
+    """
+
+    LAUNCHER_TOKEN = "mw-launcher-token-aaaa1111"
+    SERVING_TOKEN = "mw-serving-token-bbbb2222"
+
+    def test_b_scope_excludes_launcher_env_token(self, monkeypatch):
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+
+        # Launcher profile A's credential lives in the process env.
+        monkeypatch.setenv("SERVICE_TOKEN", self.LAUNCHER_TOKEN)
+        set_multiplex_active(True)
+        token = set_secret_scope({"SERVICE_TOKEN": self.SERVING_TOKEN})
+        try:
+            # B's own value is a candidate...
+            assert self.SERVING_TOKEN in redact._exact_secret_values()
+            # ...but the launcher's env token is NOT (ownership, not env scan).
+            assert self.LAUNCHER_TOKEN not in redact._exact_secret_values()
+        finally:
+            reset_secret_scope(token)
+            set_multiplex_active(False)
+
+    def test_b_payload_with_a_literal_is_left_alone(self, monkeypatch):
+        """An A-only literal in B's otherwise non-secret payload is left unchanged:
+        it is not a candidate under B's scope, so it must not be masked."""
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+
+        monkeypatch.setenv("SERVICE_TOKEN", self.LAUNCHER_TOKEN)
+        set_multiplex_active(True)
+        token = set_secret_scope({})  # B owns no credential-shaped secrets
+        try:
+            out = redact_sensitive_text(f"peer value {self.LAUNCHER_TOKEN} echoed", force=True)
+            assert self.LAUNCHER_TOKEN in out
+        finally:
+            reset_secret_scope(token)
+            set_multiplex_active(False)
+
+    def test_empty_b_scope_inherits_nothing_from_launcher(self, monkeypatch):
+        """An explicitly empty routed scope inherits nothing from the launcher env."""
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+
+        monkeypatch.setenv("SERVICE_TOKEN", self.LAUNCHER_TOKEN)
+        set_multiplex_active(True)
+        token = set_secret_scope({})
+        try:
+            assert self.LAUNCHER_TOKEN not in redact._exact_secret_values()
+        finally:
+            reset_secret_scope(token)
+            set_multiplex_active(False)
+
+    def test_multiplex_with_no_scope_fails_closed(self, monkeypatch):
+        """Multiplexing active but no routed scope: fail closed (no env fallback)."""
+        from agent.secret_scope import set_multiplex_active
+
+        monkeypatch.setenv("SERVICE_TOKEN", self.LAUNCHER_TOKEN)
+        set_multiplex_active(True)
+        try:
+            assert self.LAUNCHER_TOKEN not in redact._exact_secret_values()
+        finally:
+            set_multiplex_active(False)
+
+    def test_single_profile_still_scans_env(self, monkeypatch):
+        """Single-profile (no scope, multiplex off): the env scan still applies."""
+        from agent.secret_scope import set_multiplex_active
+
+        set_multiplex_active(False)
+        monkeypatch.setenv("MY_SERVICE_TOKEN", OPAQUE_ENV_VALUE)
+        assert OPAQUE_ENV_VALUE in redact._exact_secret_values()

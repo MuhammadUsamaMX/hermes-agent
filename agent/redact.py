@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import threading
+from typing import Mapping
 from urllib.parse import unquote_plus
 
 # Shared with agent/file_safety's read-block list so the two defenses can't
@@ -109,11 +110,53 @@ _EXACT_SECRET_ENV_SUFFIXES = (
 _EXACT_SECRET_MASK = "***"
 
 
+def _credential_shaped_values(mapping: Mapping[str, str]) -> list[str]:
+    """Values of credential-shaped entries in ``mapping`` (suffix-matched on the name)."""
+    out: list[str] = []
+    for name, value in mapping.items():
+        try:
+            if str(name).upper().endswith(_EXACT_SECRET_ENV_SUFFIXES):
+                out.append(value)
+        except Exception:  # noqa: BLE001 — a hostile entry must not break egress redaction
+            continue
+    return out
+
+
+def _routed_credential_values() -> list[str]:
+    """Credential-shaped candidate values for the profile actually serving the task.
+
+    The regression this fixes (#77162 P2): an unconditional ``os.environ`` scan
+    ignores ownership, so in a multiplex process the launcher profile's
+    ``SERVICE_TOKEN`` is both applied to another profile's output and used as the
+    mask source, while the serving profile's own value is missing.
+
+    * Routed scope installed (``set_secret_scope`` under multiplex): candidates
+      come from THAT mapping only — the same ownership ``get_secret`` enforces.
+      An explicitly empty scope inherits nothing from the launcher; a missing
+      scope under multiplex fails closed (empty) rather than reading ``os.environ``.
+    * No scope (single-profile shell / systemd / ``op run``): the process env IS
+      where applied credentials live, so the suffix scan applies as before.
+    """
+    from agent import secret_scope
+
+    scope = secret_scope.current_secret_scope()
+    if scope is not None:
+        return _credential_shaped_values(scope)
+    if secret_scope._MULTIPLEX_ACTIVE:
+        # Multiplexing with no routed owner: fail closed, never the launcher env.
+        return []
+    return _credential_shaped_values(os.environ)
+
+
 def _exact_secret_values() -> list[str]:
     """Candidate exact values for the active profile, longest first.
 
     Longest-first matters: a value that is a substring of another must never
     shadow its superstring and leave a partial leak behind.
+
+    Candidate ownership is routed-profile-scoped (see :func:`_routed_credential_values`);
+    the active-home external-source half (arbitrary-name values that belong to the
+    active home) is kept unconditionally.
     """
     values: set[str] = set()
     try:
@@ -121,14 +164,9 @@ def _exact_secret_values() -> list[str]:
         from hermes_cli.env_loader import get_secret_source_values
 
         values.update(get_secret_source_values(get_hermes_home()).values())
-    except Exception:  # noqa: BLE001 — snapshot unavailable: the env half still applies
+    except Exception:  # noqa: BLE001 — snapshot unavailable: the routed half still applies
         pass
-    for name, value in os.environ.items():
-        try:
-            if name.upper().endswith(_EXACT_SECRET_ENV_SUFFIXES):
-                values.add(value)
-        except Exception:  # noqa: BLE001 — a hostile env entry must not break egress redaction
-            continue
+    values.update(_routed_credential_values())
     candidates: list[str] = [
         v for v in values if isinstance(v, str) and len(v) >= _EXACT_SECRET_MIN_LEN
     ]
