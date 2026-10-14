@@ -621,7 +621,7 @@ class BatchRunner:
         print("=" * 70 + "\n")
         return True
 
-    def _next_shard_number(self) -> int:
+    def _next_shard_number(self, batch_stats: dict | None = None) -> int:
         """First unused ``batch_N.jsonl`` shard number.
 
         Resume re-chunks the remaining prompts, so its numbering must continue
@@ -629,12 +629,19 @@ class BatchRunner:
         append new rows into the previous run's files and overwrite that run's
         per-shard ``batch_stats`` with counts for a different prompt subset
         (#95322).
+
+        ``batch_stats`` counts too: a batch whose prompts all failed records a
+        checkpoint key but writes no file, so disk alone leaves a gap the next
+        run numbers into — reusing a key the previous run still owns.
         """
         highest = -1
         for path in self.output_dir.glob("batch_*.jsonl"):
             suffix = path.stem[len("batch_"):]
             if suffix.isdigit():
                 highest = max(highest, int(suffix))
+        for key in (batch_stats or {}):
+            if str(key).isdigit():
+                highest = max(highest, int(key))
         return highest + 1
 
     def _worker_config(self) -> dict[str, Any]:
@@ -849,10 +856,10 @@ class BatchRunner:
             # prompts that happen to share a stale index (#95322). Seed from
             # the fresh indices _apply_resume just computed instead.
             completed_prompts_set = set(self._resume_skipped_indices)
-            # Number this run's shards past the ones already on disk so new
-            # rows never append into a previous run's batch_*.jsonl / stats
-            # (#95322).
-            shard_offset = self._next_shard_number()
+            # Number this run's shards past the ones already on disk and past the
+            # checkpoint's own keys — an all-failed batch records a key but writes no
+            # file, so disk alone would number into that gap (#95322).
+            shard_offset = self._next_shard_number(checkpoint_data.get('batch_stats'))
         else:
             completed_prompts_set = set(checkpoint_data.get("completed_prompts", []))
             shard_offset = 0

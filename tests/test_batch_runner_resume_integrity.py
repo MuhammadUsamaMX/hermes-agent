@@ -236,3 +236,66 @@ def test_resume_content_filter_tolerates_non_string_prompts(tmp_path):
 
     kept_indices = [idx for batch in runner.batches for idx, _ in batch]
     assert kept_indices == [0, 1, 2, 4], "content filter mis-handled a non-string prompt"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. A checkpoint key with no file on disk still owns its shard number
+# ─────────────────────────────────────────────────────────────────────
+
+def test_resume_numbers_past_checkpoint_keys_that_wrote_no_file(tmp_path, monkeypatch):
+    """An all-failed batch records a `batch_stats` key but writes no shard file, so
+    numbering from files alone reuses a key the previous run already owns and
+    overwrites its stats with counts for a different prompt subset (#95322)."""
+    # Only batch_0.jsonl reached disk; keys "1" and "2" are orphans from failed batches.
+    orphaned_stats = {
+        "0": {"processed": 2, "skipped": 0, "discarded_no_reasoning": 0},
+        "1": {"processed": 2, "skipped": 0, "discarded_no_reasoning": 0},
+        "2": {"processed": 2, "skipped": 0, "discarded_no_reasoning": 1},
+    }
+    batch_files = {
+        "batch_0.jsonl": json.dumps(
+            {
+                "prompt_index": 0,
+                "conversations": [
+                    {"from": "human", "value": "done"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "completed": True,
+                "tool_stats": {},
+            }
+        )
+        + "\n",
+    }
+    runner, out_dir = _setup(
+        tmp_path,
+        monkeypatch,
+        rows=[{"prompt": "done"}, {"prompt": "never-done"}],
+        batch_files=batch_files,
+        checkpoint={
+            "run_name": RUN_NAME,
+            "completed_prompts": [0],
+            "batch_stats": json.loads(json.dumps(orphaned_stats)),
+        },
+    )
+    before = (out_dir / "batch_0.jsonl").read_bytes()
+    processed = []
+    _record_processed(monkeypatch, processed)
+
+    with patch.object(batch_runner, "Pool", return_value=_fake_pool_ctx()):
+        runner.run(resume=True)
+
+    assert processed == [1]
+    # Past the orphaned keys, not merely past the files that exist on disk.
+    assert (out_dir / "batch_3.jsonl").exists(), (
+        "resumed shards numbered into the gap left by a batch_stats key with no file"
+    )
+    assert not (out_dir / "batch_1.jsonl").exists()
+    assert (out_dir / "batch_0.jsonl").read_bytes() == before
+
+    checkpoint = _load_json(out_dir / "checkpoint.json")
+    # The orphaned runs' stats survive; the resumed subset gets its own fresh key.
+    for key in ("0", "1", "2"):
+        assert checkpoint["batch_stats"][key] == orphaned_stats[key], (
+            f"resumed run overwrote batch_stats['{key}'] with counts for a different prompt subset"
+        )
+    assert checkpoint["batch_stats"]["3"]["processed"] == 1
