@@ -186,7 +186,7 @@ def core_ships_platform(name: str) -> bool:
 
 
 def plugin_platform_disabled(
-    entry: PlatformEntry, *, disabled: Optional[Set[str]] = None
+    entry: PlatformEntry, *, disabled: Optional[set[str]] = None
 ) -> Optional[str]:
     """The ``plugins.disabled`` spelling that denies *entry*, else ``None``.
 
