@@ -549,16 +549,28 @@ def _check_compression_trigger(should_fix: bool, f: Finding) -> None:
     30% ratio on a 1M-window model once set, and before this the only proof was grepping ``threshold=``
     out of ``agent.log``, and the startup line quoted the capped number as if it were the ratio.
 
-    Purely informational: the shipped default is deliberate (#115986), so this appends nothing to
-    ``f.issues``/``f.manual_issues`` and never changes doctor's exit status. Window resolution is
+    Purely informational: it appends nothing to ``f.issues``/``f.manual_issues`` and never changes
+    doctor's exit status. Window resolution is
     offline on purpose (config pin > custom provider > static catalog) — a doctor run must not
     probe the network; steps that would are skipped and the line says so.
     """
+    from contextlib import suppress
+
     from agent.context_compressor import compression_trigger_report, resolve_model_threshold
     from agent.model_metadata import (
         DEFAULT_CONTEXT_LENGTHS, _config_override_context_length, _longest_key_match,
     )
     from hermes_cli.config import load_config, read_raw_config_readonly, split_model_config_default
+
+    def _offline_window(model: str, base_url: str, provider: str, custom_providers: list, pin=None):
+        """``(window, source)`` from config only — a doctor run must never probe the network."""
+        if isinstance(pin, int) and not isinstance(pin, bool) and pin > 0:
+            return pin, "context_length override"
+        window = _config_override_context_length(model, base_url, provider, custom_providers)
+        if window:
+            return window, "custom provider config"
+        hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
+        return (hit[1], "static catalog") if hit else (None, None)
 
     cfg = load_config()
     comp = cfg.get("compression") or {}
@@ -573,20 +585,9 @@ def _check_compression_trigger(should_fix: bool, f: Finding) -> None:
         check_info("No model.default configured — set it to see the compression trigger")
         return
 
-    pin = model_cfg.get("context_length")
-    window = None
-    if isinstance(pin, int) and not isinstance(pin, bool) and pin > 0:
-        window, window_src = pin, "model.context_length"
-    if window is None:
-        window = _config_override_context_length(
-            model, str(model_cfg.get("base_url") or ""), provider,
-            model_cfg.get("custom_providers") or cfg.get("custom_providers") or [],
-        )
-        window_src = "custom provider config"
-    if window is None:
-        hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
-        if hit:
-            window, window_src = hit[1], "static catalog"
+    custom_providers = model_cfg.get("custom_providers") or cfg.get("custom_providers") or []
+    base_url = str(model_cfg.get("base_url") or "")
+    window, window_src = _offline_window(model, base_url, provider, custom_providers, model_cfg.get("context_length"))
     if window is None:
         check_warn(f"Compression trigger unknown for {model}", "(set model.context_length for an exact number)")
         return
@@ -606,7 +607,32 @@ def _check_compression_trigger(should_fix: bool, f: Finding) -> None:
     except (TypeError, ValueError):
         cap = None
 
-    rep = compression_trigger_report(context_length=window, ratio_percent=ratio_pct, cap=cap)
+    # The trigger is pct x (window - max_tokens), so quoting the ratio against the raw window
+    # is wrong on any route that reserves output tokens. Mirrors _compressor_max_tokens: an
+    # explicit model.max_tokens, else the native-Gemini default, else no reservation.
+    max_tokens = model_cfg.get("max_tokens")
+    if not (isinstance(max_tokens, int) and not isinstance(max_tokens, bool) and max_tokens > 0):
+        max_tokens = None
+    if max_tokens is None and provider.lower() in {"gemini", "google", "google-gemini", "google-ai-studio"}:
+        with suppress(Exception):
+            from agent.gemini_native_adapter import GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+            max_tokens = GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+
+    # A summariser with a smaller window clamps the installed trigger down to its own
+    # (#114707); report it when config says so.
+    aux_ceiling = _offline_window(
+        str((cfg.get("auxiliary") or {}).get("compression", {}).get("model") or ""),
+        str((cfg.get("auxiliary") or {}).get("compression", {}).get("base_url") or ""),
+        str((cfg.get("auxiliary") or {}).get("compression", {}).get("provider") or ""),
+        custom_providers,
+        (cfg.get("auxiliary") or {}).get("compression", {}).get("context_length"),
+    )[0]
+    if aux_ceiling is not None and aux_ceiling >= window:
+        aux_ceiling = None  # only a smaller aux window can clamp
+
+    rep = compression_trigger_report(
+        context_length=window, ratio_percent=ratio_pct, cap=cap, max_tokens=max_tokens, aux_ceiling=aux_ceiling,
+    )
     window_line = f"Compression trigger: {rep['effective_tokens']:,} of {window:,} tokens for {model}"
     ratio_line = f"(ratio {int(round(rep['ratio_percent'] * 100))}% asks for {rep['ratio_tokens']:,}; {window_src})"
 

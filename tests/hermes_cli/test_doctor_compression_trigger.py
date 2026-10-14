@@ -109,3 +109,60 @@ def test_check_is_registered_with_doctor():
     assert any("Compression" in title for title in titles), (
         f"the compression trigger check must appear in DOCTOR_CHECKS, got {titles}"
     )
+
+
+def _engine_installs(window, ratio_percent, cap, max_tokens):
+    """The value ContextCompressor actually installs — the number doctor must agree with."""
+    from agent.context_compressor import ContextCompressor
+
+    pct = ContextCompressor._effective_threshold_percent(window, ratio_percent)
+    ratio_tokens = ContextCompressor._compute_threshold_tokens(window, pct, max_tokens)
+    cap_eff = min(cap, window) if cap is not None else None
+    return cap_eff if cap_eff is not None and cap_eff < ratio_tokens else ratio_tokens
+
+
+def test_doctor_matches_the_installed_trigger_when_max_tokens_is_configured(monkeypatch, capsys):
+    """The trigger is pct x (window - max_tokens); doctor used the raw window, so it quoted a
+    trigger the engine never installs and named the wrong setting as binding."""
+    window, max_tokens, pct = 1_000_000, 131_072, 0.3
+    f, out = _run(monkeypatch, capsys, config={
+        "model": {"default": "deepseek-flash", "provider": "deepseek", "max_tokens": max_tokens},
+        "compression": {"enabled": True, "threshold": pct, "threshold_tokens": None},
+    }, raw={})
+    installed = _engine_installs(window, pct, None, max_tokens)
+    assert f"{installed:,}" in out, (
+        f"doctor must quote the engine's installed trigger {installed:,}, got: {out}"
+    )
+    assert f"{int(window * pct):,}" not in out, "the raw-window number must not be shown as the trigger"
+    assert f.issues == []
+
+
+def test_doctor_matches_the_installed_trigger_on_native_gemini(monkeypatch, capsys):
+    """No model.max_tokens is configured, but the native-Gemini route reserves 65,535 output
+    tokens by default, so 30% of a 1M window is not 314,572."""
+    window, pct = 1_048_576, 0.3
+    from agent.gemini_native_adapter import GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+
+    f, out = _run(monkeypatch, capsys, config={
+        "model": {"default": "gemini-2.5-pro", "provider": "gemini"},
+        "compression": {"enabled": True, "threshold": pct, "threshold_tokens": None},
+    }, raw={})
+    installed = _engine_installs(window, pct, None, GEMINI_DEFAULT_MAX_OUTPUT_TOKENS)
+    assert f"{installed:,}" in out, f"expected {installed:,} (65,535 reserved), got: {out}"
+    assert f"{int(window * pct):,}" not in out
+    assert f.issues == []
+
+
+def test_doctor_blames_the_cap_only_when_the_cap_actually_binds(monkeypatch, capsys):
+    """With the reservation applied the ratio asks for 491,520, so a 480,000 cap does bind —
+    but with a larger reservation the same cap must not be blamed."""
+    window, cap = 1_048_576, 480_000
+    # 30% x (1,048,576 - 131,072) = 275,251, well under the cap: ratio wins, cap is not blamed.
+    f, out = _run(monkeypatch, capsys, config={
+        "model": {"default": "gemini-2.5-pro", "provider": "gemini", "max_tokens": 131_072},
+        "compression": {"enabled": True, "threshold": 0.3, "threshold_tokens": cap},
+    }, raw={})
+    installed = _engine_installs(window, 0.3, cap, 131_072)
+    assert installed == 275_251, f"premise: {installed:,}"
+    assert "set in config.yaml" not in out, "a cap that does not bind must not be blamed"
+    assert f"{installed:,}" in out
