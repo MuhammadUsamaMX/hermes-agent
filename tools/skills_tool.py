@@ -319,33 +319,51 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     return None, (f"{namespace}/{bare}" if bare else None)  # plugin not found → local scan
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """True when ``path`` is a symlink or a Windows junction — a reparse point whose listed
+    path can differ from its resolved target.
+
+    ``Path.is_symlink()`` returns False for junctions (and other reparse points), so a bail
+    keyed only on it is bypassed by ``mklink /J``, which needs no elevation. ``is_junction``
+    is Python 3.12+; on 3.11 there is no cheap portable probe, so callers degrade to the
+    symlink-only check there."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction()) if is_junction else False
+
+
 def _under_any(path: Path, dirs) -> bool:
     """True when ``path`` is covered by one of ``dirs``.
+
+    Advisory only: this runs after the content read and decides whether to log the
+    "outside the trusted skills directory" warning. The blocking trust decisions (project
+    tier precedence, quarantine) are made elsewhere and do not rely on this predicate.
 
     Both views of the path get a say, because they answer different questions:
 
     * the RESOLVED path under a root — a path outside every root that resolves into one
       is content a root already exposes;
     * otherwise the path AS LISTED under a root, but only when the final entry is not
-      itself a symlink. Exposing a skill source stored elsewhere under a trusted root
-      with a directory symlink (``~/.hermes/skills/<name> -> /opt/skills/<name>``) is a
-      supported install shape and must stay quiet (#35674), while
-      ``<root>/<name>/SKILL.md`` as a symlink to content no root exposes is the escape
-      this guard exists to catch.
+      itself a reparse point (symlink/junction). Exposing a skill source stored elsewhere
+      under a trusted root with a directory symlink
+      (``~/.hermes/skills/<name> -> /opt/skills/<name>``) is a supported install shape and
+      must stay quiet (#35674), while ``<root>/<name>/SKILL.md`` as a link to content no
+      root exposes is the escape this guard exists to catch.
 
     Roots are accepted unresolved or resolved, so callers can pass whichever they hold."""
     roots: List[Path] = []
     for d in dirs:
         d = Path(d)
         roots.append(d)
-        with suppress(Exception):
+        with suppress(OSError, RuntimeError):
             roots.append(d.resolve())
     resolved = path
-    with suppress(Exception):
+    with suppress(OSError, RuntimeError):
         resolved = path.resolve()
     if any(resolved.is_relative_to(r) for r in roots):
         return True
-    if path.is_symlink():
+    if _is_reparse_point(path):
         return False
     return any(path.is_relative_to(r) for r in roots)
 
