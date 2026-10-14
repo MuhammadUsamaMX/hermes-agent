@@ -124,7 +124,7 @@ def reload_plugins_verb(runner: Any, loop: asyncio.AbstractEventLoop) -> Callabl
     return _handler
 
 
-async def _wiring_report(runner: Any, profile_name: Optional[str]) -> Dict[str, Any]:
+async def _wiring_report(runner: Any, profile_name: Optional[str]) -> dict[str, Any]:
     """``{adapters_rewired, handler_wiring_failures}`` for the profile, read on the loop AFTER the
     re-wire callback (FIFO). Counting adapter objects never said whether the re-wire succeeded, so
     the failures are read back from the adapters themselves (#119502)."""
