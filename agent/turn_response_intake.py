@@ -21,9 +21,11 @@ from agent.turn_truncation import (
 
 logger = logging.getLogger("agent.conversation_loop")
 
-_REASONING_TAG_RE = re.compile(r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>')
-# One alternation over the shared tag list so this path tracks every tag the scrubber hides.
-_THINK_TAG_ALT = "|".join(THINK_TAG_NAMES)
+# One alternation over the shared tag list, so BOTH paths below track every tag the
+# scrubber hides. The delimiter strip used to bind only 3 of the 9 names, which left
+# the subagent first-line preview showing raw <thinking>/<thought>/CJK tag text.
+_THINK_TAG_ALT = "|".join(re.escape(name) for name in THINK_TAG_NAMES)
+_REASONING_TAG_RE = re.compile(rf'</?(?:{_THINK_TAG_ALT})>', re.IGNORECASE)
 _INLINE_REASONING_RE = re.compile(
     rf'<(?:{_THINK_TAG_ALT})>(.*?)</(?:{_THINK_TAG_ALT})>',
     re.DOTALL | re.IGNORECASE,
@@ -191,8 +193,13 @@ def normalize_model_response(
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content}")
         else:
             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content[:100]}{'...' if len(content) > 100 else ''}")
-    if content and agent.tool_progress_callback:
-        _relay_thinking(agent, content, assistant_message)
+    # Gate on the callback alone, not on `content`: a turn carrying native reasoning
+    # plus tool calls and no text content still has reasoning worth showing (#118934,
+    # nekwo 2026-09-30). `_relay_thinking` decides what is worth emitting — it returns
+    # without a callback call when the turn carries no reasoning, and the subagent
+    # `_thinking` lane returns early on an empty first line.
+    if agent.tool_progress_callback:
+        _relay_thinking(agent, content or "", assistant_message)
 
     # Incomplete <REASONING_SCRATCHPAD> (opened, never closed): the model ran out of
     # output tokens mid-reasoning — retry up to 2 times, then save as partial.

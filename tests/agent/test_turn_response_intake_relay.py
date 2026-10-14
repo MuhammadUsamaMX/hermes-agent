@@ -49,9 +49,9 @@ class _Agent:
         return [c for c in self.calls if c[0] == "reasoning.available"]
 
 
-def _run(agent, *, content, reasoning=None, reasoning_content=None):
+def _run(agent, *, content, reasoning=None, reasoning_content=None, tool_calls=None):
     message = SimpleNamespace(
-        content=content, finish_reason="stop", tool_calls=None, reasoning=reasoning,
+        content=content, finish_reason="stop", tool_calls=tool_calls, reasoning=reasoning,
         reasoning_content=reasoning_content, reasoning_details=None,
     )
     normalize_model_response(
@@ -112,3 +112,57 @@ def test_relay_is_silent_without_a_callback():
     agent.tool_progress_callback = None
     _relay_thinking(agent, "<think>hush</think>ok", SimpleNamespace(content="<think>hush</think>ok"))
     assert agent.calls == []
+
+
+def test_tool_call_only_turn_with_reasoning_still_emits_reasoning_available():
+    """A turn with native reasoning plus tool calls and no text content used to be
+    skipped entirely: the call site was gated on `content` (nekwo, 2026-09-30)."""
+    agent = _Agent()
+    calls = _run(
+        agent,
+        content=None,
+        tool_calls=[SimpleNamespace(id="call_1", function=SimpleNamespace(name="read", arguments="{}"))],
+        reasoning="secret plan",
+    )
+    assert calls == [("reasoning.available", "_thinking", "secret plan", None)]
+
+
+def test_tool_call_only_turn_without_reasoning_emits_nothing():
+    """Gating on the callback alone must not turn a plain tool-call turn into a
+    reasoning event: the preview returns '' and the relay returns early."""
+    agent = _Agent()
+    calls = _run(
+        agent,
+        content=None,
+        tool_calls=[SimpleNamespace(id="call_1", function=SimpleNamespace(name="read", arguments="{}"))],
+    )
+    assert calls == []
+
+
+def test_subagent_tool_call_only_turn_emits_no_preview():
+    """The subagent lane's first line comes from `content`, which is empty here,
+    so it must stay silent rather than forward an empty preview."""
+    agent = _Agent(delegate_depth=1)
+    calls = _run(
+        agent,
+        content=None,
+        tool_calls=[SimpleNamespace(id="call_1", function=SimpleNamespace(name="read", arguments="{}"))],
+        reasoning="secret plan",
+    )
+    assert calls == []
+
+
+def test_subagent_first_line_preview_strips_every_shared_reasoning_tag():
+    """The preview's delimiter strip used to bind 3 of the 9 shared tag names, so
+    <thinking>, <thought> and the CJK names reached the parent verbatim."""
+    from agent.think_scrubber import THINK_TAG_NAMES
+
+    for name in THINK_TAG_NAMES:
+        agent = _Agent(delegate_depth=1)
+        calls = _run(agent, content=f"<{name}>secret internal plan</{name}>\nVisible answer")
+        assert [c[0] for c in calls] == ["_thinking"], name
+        preview = calls[0][1]
+        assert f"<{name}>" not in preview and f"</{name}>" not in preview, (
+            f"the {name} delimiters must never reach the parent preview"
+        )
+        assert preview == "secret internal plan", name
