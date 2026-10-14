@@ -35,6 +35,10 @@ def _activate(answer: dict) -> dict:
         {"reloaded": True, "adapters_rewired": 1, "handler_wiring_failures": ["demo"],
          "activations": [_DEMO]},
         id="raising-handler-factory"),
+    # a gateway that predates the receipt answers with a bare count and no wiring key (#119502)
+    pytest.param(
+        {"reloaded": True, "adapters_rewired": 2, "activations": [_DEMO]},
+        id="old-gateway"),
 ])
 def test_unconfirmed_or_failed_wiring_never_claims_callbacks_active(answer: dict):
     result = _activate(answer)
@@ -48,7 +52,8 @@ def test_unconfirmed_or_failed_wiring_never_claims_callbacks_active(answer: dict
 
 
 def test_confirmed_wiring_keeps_the_existing_active_now_receipt():
-    result = _activate({"reloaded": True, "adapters_rewired": 2, "activations": [_DEMO]})
+    result = _activate({"reloaded": True, "adapters_rewired": 2, "handler_wiring_failures": [],
+                        "activations": [_DEMO]})
     assert result["handler_wiring"] == "confirmed"
     assert result["handler_wiring_failures"] == []
     assert activation_hint(result) == (

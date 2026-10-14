@@ -2302,7 +2302,7 @@ class BasePlatformAdapter(ABC):
             self._plugin_handlers_wired.add(key)
             self._plugin_handlers_failed.discard(key)
 
-    def plugin_handler_wiring_failures(self) -> List[str]:
+    def plugin_handler_wiring_failures(self) -> list[str]:
         """Sorted plugin names whose ``register_platform_handler`` factory is still unwired on the
         live native client because it raised (``[]`` = every factory it has seen succeeded). The
         ``reload-plugins`` receipt reads this back to attest that the re-wire succeeded instead of
