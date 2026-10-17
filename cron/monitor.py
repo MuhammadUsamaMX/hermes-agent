@@ -18,6 +18,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from agent.compression_marker import elide
+
 logger = logging.getLogger(__name__)
 
 # Prompt-injection caps: unified diff, and new-output block (mirrors the 8k context_from truncation
@@ -54,7 +56,7 @@ def build_monitor_diff(old: str, new: str) -> str:
         )
     )
     if len(diff) > MAX_DIFF_CHARS:
-        diff = diff[:MAX_DIFF_CHARS] + "\n... [diff truncated]"
+        diff = elide(diff, MAX_DIFF_CHARS)
     return diff
 
 
@@ -147,7 +149,7 @@ def check_monitor(job: dict) -> MonitorOutcome:
 
     shown_output = output
     if len(shown_output) > MAX_OUTPUT_CHARS:
-        shown_output = shown_output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
+        shown_output = elide(shown_output, MAX_OUTPUT_CHARS)
 
     current = f"### Current output\n\n```\n{shown_output}\n```"
     if first_run:

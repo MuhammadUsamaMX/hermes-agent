@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.compression_marker import elide
 from agent.memory_provider import MemoryProvider, spawn_context_thread
 from tools.registry import tool_error
 
@@ -266,7 +267,7 @@ def _format_query_output(output: str) -> dict:
     output = output.strip()
     if len(output) < _MIN_OUTPUT_LEN:
         return {"result": "No relevant memories found."}
-    return {"result": output[:8000] + "\n\n[... truncated]" if len(output) > 8000 else output}
+    return {"result": elide(output, 8000)}
 
 
 # tool name -> (required arg or None, failure message, run(provider, arg_value) -> brv result, on_ok(output) -> JSON payload)

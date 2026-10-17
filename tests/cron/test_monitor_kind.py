@@ -23,9 +23,13 @@ enabler: #80774.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import pytest
+
+# #121572: any rendering of the bare truncation idiom, e.g. "…[truncated]".
+IMITABLE_IDIOM_RE = re.compile(r"(?:…|\.\.\.)\s*[\[(][^\])]{0,200}?truncat")
 
 
 @pytest.fixture
@@ -230,8 +234,12 @@ def test_unified_diff_is_capped(hermes_env):
     old = "\n".join(f"line {i}" for i in range(5000))
     new = "\n".join(f"LINE {i}" for i in range(5000))
     diff = build_monitor_diff(old, new)
-    assert len(diff) <= MAX_DIFF_CHARS + 200  # cap + truncation notice
-    assert "truncated" in diff
+    assert len(diff) <= MAX_DIFF_CHARS + 200  # cap + elision marker
+    # #121572: the elision mints the guarded compression marker (per-instance
+    # "N of M chars omitted"), never the imitable bare "... [truncated]" idiom a
+    # model copies from injected monitor output back into new writes.
+    assert "chars omitted" in diff
+    assert not IMITABLE_IDIOM_RE.search(diff)
 
 
 # ---------------------------------------------------------------------------
