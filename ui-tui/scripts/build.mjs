@@ -2,9 +2,10 @@
 // Bundles src/entry.tsx into a single self-contained dist/entry.js.
 // No runtime node_modules needed.
 import { build } from 'esbuild'
-import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+
+import { publishBundle } from './publishBundle.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
@@ -26,7 +27,7 @@ const stubDevtools = {
   }
 }
 
-await build({
+const result = await build({
   entryPoints: [resolve(root, 'src/entry.tsx')],
   bundle: true,
   platform: 'node',
@@ -50,6 +51,12 @@ await build({
   banner: {
     js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);"
   },
+  // Keep the bundle in memory instead of letting esbuild write dist/entry.js
+  // directly: publishBundle() below puts it in place with a temp file + rename.
+  // Concurrent launches (two dashboards, a dashboard plus `hermes --tui`, or
+  // parallel test workers) each rebuild this same path, and an in-place write
+  // let a TUI load a truncated bundle and die with a SyntaxError (#121286).
+  write: false,
   logLevel: 'info'
 })
 
@@ -58,9 +65,11 @@ await build({
 // the `node` token, leaving a broken interpreter). The hermes_cli launcher
 // always invokes this file as `node dist/entry.js` anyway, so the shebang is
 // redundant — strip it.
-const body = readFileSync(out, 'utf8')
-if (body.startsWith('#!')) {
-  writeFileSync(out, body.slice(body.indexOf('\n') + 1))
-}
+const bundle = result.outputFiles[0].text
+const body = bundle.startsWith('#!') ? bundle.slice(bundle.indexOf('\n') + 1) : bundle
+
+// Write via temp file + rename so a concurrent `node dist/entry.js` reads either
+// the previous bundle or this one, never a half-written file (#121286).
+await publishBundle(out, body)
 
 console.log(`built ${out}`)
