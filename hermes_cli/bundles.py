@@ -6,6 +6,7 @@ import sys
 from typing import List
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from hermes_cli.cli_output import line_input
@@ -55,15 +56,15 @@ def _cmd_show(args) -> None:
     info = get_bundle(args.name)
     if not info:
         _fail(c, f"[bold red]Bundle {args.name!r} not found.[/]")
-    c.print(f"[bold cyan]/{info['slug']}[/]  [bold]{info['name']}[/]")
+    c.print(f"[bold cyan]/{escape(str(info['slug']))}[/]  [bold]{escape(str(info['name']))}[/]")
     if info.get("description"):
-        c.print(f"  {info['description']}")
-    c.print(f"  [dim]File: {info['path']}[/]")
+        c.print(f"  {escape(str(info['description']))}")
+    c.print(f"  [dim]File: {escape(str(info['path']))}[/]")
     c.print(f"  [bold]Skills ({len(info['skills'])}):[/]")
     for s in info["skills"]:
-        c.print(f"    - {s}")
+        c.print(f"    - {escape(str(s))}")
     if info.get("instruction"):
-        c.print(f"  [bold]Instruction:[/]\n    {info['instruction']}")
+        c.print(f"  [bold]Instruction:[/]\n    {escape(str(info['instruction']))}")
 
 
 def _cmd_create(args) -> None:
