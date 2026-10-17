@@ -939,6 +939,12 @@ def _print_tier1_advisory(skill_dir, console) -> None:
         if not report.available:
             return
         text = format_tier1_report(report)
+        # The report is built from the scanned skill's own findings (file paths and matched
+        # strings), so it is user content. Un-escaped, a bracket shape raises MarkupError — and
+        # the blanket ``except`` below swallows it, silently dropping a credential warning
+        # (#98789). A Panel parses markup, so escape there too.
+        from rich.markup import escape as _escape
+        text = _escape(text)
         if not report.findings:
             console.print(f"[dim]{text}[/]")
             return

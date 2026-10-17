@@ -16,6 +16,7 @@ from agent.i18n import t
 from agent.interrupt_compat import request_hard_interrupt
 from contextlib import suppress
 from pathlib import Path
+from rich.markup import escape as _escape
 from typing import Any
 
 # Log-record parity with the origin module.
@@ -541,7 +542,11 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
         # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
         _query_label = query or ("[image attached]" if single_query_images else "")
         if _query_label:
-            cli.console.print(f"[bold blue]{t('cli.single_query.query_label')}[/] {_query_label}")
+            # The query is arbitrary user text (a --query-file handoff, a kanban task body), so it
+            # must render literally: a bracket shape like ``test_case[/fb-images/a.webp]`` is an
+            # unmatched Rich closing tag and used to raise MarkupError, killing the turn before the
+            # agent started (#98789). Escape the label, keep our own markup.
+            cli.console.print(f"[bold blue]{_escape(t('cli.single_query.query_label'))}[/] {_escape(_query_label)}")
         cli._show_security_advisories()
         response = cli.chat(query, images=single_query_images or None)
         # Kanban worker: a failed-silently turn used to end the run as rc=0 with no

@@ -1300,7 +1300,11 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
     def _queue_loaded_skills(self, msg, label: str, missing) -> None:
         print(f"\n⚡ {label}")
         if missing:
-            ChatConsole().print(f"[yellow]{_t('cli.skills.skipped_missing', names=', '.join(missing))}[/]")
+            # ``missing`` holds skill names a bundle references — user-authored text. A name with a
+            # bracket shape is an unmatched Rich closing tag and used to abort the chat with
+            # MarkupError; escape the names, not the translated frame (#98789).
+            from rich.markup import escape as _escape
+            ChatConsole().print(f"[yellow]{_t('cli.skills.skipped_missing', names=_escape(', '.join(missing)))}[/]")
         self._queue_skill_message(msg)
 
     def _run_skill_slash_command(self, base_cmd: str, skill_info: dict, rest: str) -> None:
