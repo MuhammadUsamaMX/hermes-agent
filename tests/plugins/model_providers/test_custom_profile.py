@@ -75,11 +75,15 @@ class TestCustomReasoningWireShape:
         assert eb == {"think": False}
         assert tl == {"reasoning_effort": "none"}
 
-    def test_disabled_omits_think_on_mistral(self, custom_profile):
-        """Strict OpenAI-compat hosts forbid extra ``think`` (HTTP 422)."""
+    def test_disabled_omits_think_on_strict_host(self, custom_profile):
+        """Strict OpenAI-compat hosts forbid extra ``think`` (HTTP 422).
+
+        Uses a non-Ministral slug on purpose: ``ministral-*`` now suppresses the whole
+        reasoning vocabulary (#119249), so it can no longer witness the ``think`` rule.
+        """
         eb, tl = custom_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "none"},
-            model="mistral-small-latest",
+            model="gpt-5.2",
             base_url="https://api.mistral.ai/v1",
         )
         assert "think" not in eb
@@ -235,3 +239,141 @@ class TestCustomResponsesEffortVocabulary:
             },
         )
         assert (effort, enabled) == ("xhigh", True)
+
+
+#: ``provider=custom`` pointed at api.mistral.ai. Mistral answers every request carrying
+#: ``reasoning_effort`` with ``HTTP 400 reasoning_effort is not enabled for this model``,
+#: so no vocabulary member — including the ``none`` disable alias — belongs on the wire.
+MINISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+NON_REASONING_MINISTRAL_MODELS = [
+    "ministral-14b-2512",
+    "ministral-3b-2512",
+    "ministral-small-latest",
+    "ministral-large-latest",
+]
+
+
+class TestMistralRejectsReasoningEffort:
+    """#119249: the custom profile must send no reasoning controls to non-reasoning
+    Ministral models.
+
+    Both emission paths are covered: the graded effort that ``default_reasoning_config``
+    injects for an unset ``agent.reasoning_effort`` (the main-loop 400), and the
+    ``reasoning_effort="none"`` disable alias — removing only the disable path leaves
+    the default path still 400ing.
+    """
+
+    @pytest.mark.parametrize("model", NON_REASONING_MINISTRAL_MODELS)
+    def test_graded_effort_is_not_sent(self, custom_profile, model):
+        """The main-loop case: unset user effort becomes ``medium`` — still never sent."""
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+            model=model,
+            base_url=MINISTRAL_BASE_URL,
+        )
+        assert "reasoning_effort" not in tl
+        assert "reasoning_effort" not in eb
+        assert "think" not in eb
+
+    @pytest.mark.parametrize("model", NON_REASONING_MINISTRAL_MODELS)
+    @pytest.mark.parametrize(
+        "reasoning_config",
+        [
+            {"enabled": False},
+            {"enabled": True, "effort": "none"},
+            {"effort": "none"},
+            {"enabled": True, "effort": "high"},
+        ],
+        ids=["enabled-false", "effort-none", "bare-none", "high"],
+    )
+    def test_no_effort_variant_is_sent(self, custom_profile, model, reasoning_config):
+        """No vocabulary member survives — ``none`` is rejected exactly like ``medium``."""
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config=reasoning_config, model=model, base_url=MINISTRAL_BASE_URL
+        )
+        assert "reasoning_effort" not in tl
+        assert "reasoning_effort" not in eb
+        assert "think" not in eb
+
+    @pytest.mark.parametrize("model", NON_REASONING_MINISTRAL_MODELS)
+    def test_main_transport_builds_no_reasoning_kwarg(self, custom_profile, model):
+        """Drive the real main transport: the 400 the reporter saw came from this path."""
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            tools=None,
+            provider_profile=custom_profile,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url=MINISTRAL_BASE_URL,
+            provider_name="custom",
+        )
+        assert "reasoning_effort" not in kwargs
+        assert "reasoning_effort" not in kwargs.get("extra_body", {})
+
+    def test_title_generation_path_builds_no_reasoning_kwarg(self, custom_profile):
+        """The auxiliary client shares the profile, so the title-generation 400 goes too."""
+        import agent.auxiliary_client as aux
+
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+            model="ministral-3b-2512",
+            base_url=MINISTRAL_BASE_URL,
+        )
+        assert (eb, tl) == ({}, {})
+        assert hasattr(aux, "_build_call_kwargs"), "auxiliary projection seam must still exist"
+
+    def test_vendor_prefixed_slug_is_still_recognised(self, custom_profile):
+        """A ``vendor/model`` slug must be matched on its bare segment."""
+        _, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+            model="mistralai/ministral-14b-2512",
+            base_url=MINISTRAL_BASE_URL,
+        )
+        assert "reasoning_effort" not in tl
+
+    def test_orthogonal_extra_body_fields_survive(self, custom_profile):
+        """The guard drops reasoning only — ``num_ctx`` is unrelated plumbing."""
+        eb, _ = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+            model="ministral-14b-2512",
+            base_url=MINISTRAL_BASE_URL,
+            ollama_num_ctx=8192,
+        )
+        assert eb == {"options": {"num_ctx": 8192}}
+
+    @pytest.mark.parametrize("model", ["magistral-medium-latest", "magistral-small-latest"])
+    def test_reasoning_capable_mistral_models_keep_their_effort(self, custom_profile, model):
+        """Scope is the non-reasoning ``ministral-*`` family only.
+
+        ``magistral-*`` is Mistral's reasoning-tuned line and does accept
+        ``reasoning_effort``; a blanket "any Mistral model" rule would break it.
+        It shares the ``mistral`` spelling but not the ``ministral-`` prefix.
+        """
+        _, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+            model=model,
+            base_url=MINISTRAL_BASE_URL,
+        )
+        assert tl == {"reasoning_effort": "medium"}
+
+    def test_non_ministral_model_on_mistral_host_is_untouched(self, custom_profile):
+        """A relay serving other vendors through the same host keeps the wire contract."""
+        _, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "high"},
+            model="qwen3-235b",
+            base_url=MINISTRAL_BASE_URL,
+        )
+        assert tl == {"reasoning_effort": "high"}
+
+    def test_default_reasoning_config_still_fills_medium(self, custom_profile):
+        """The fix lives at the wire edge, so the default-config contract is unchanged.
+
+        ``default_reasoning_config`` stays host-agnostic: it answers what to *ask* for,
+        and ``build_api_kwargs_extras`` decides what may actually be *sent*.
+        """
+        assert custom_profile.default_reasoning_config("ministral-14b-2512") == {
+            "enabled": True,
+            "effort": "medium",
+        }

@@ -9,6 +9,26 @@ from providers import register_provider
 from providers.base import ProviderProfile
 from utils import base_url_host_matches
 
+#: Slug prefixes for models whose endpoint rejects ``reasoning_effort`` outright instead of
+#: accepting some subset of it: every value, including the ``none`` disable alias, draws
+#: ``HTTP 400 reasoning_effort is not enabled for this model``. There is no vocabulary to
+#: clamp onto, so the field is omitted rather than mapped (#119249).
+#:
+#: Mistral's general-purpose ``ministral-*`` line is the confirmed case. ``magistral-*`` is
+#: Mistral's reasoning-tuned line and DOES accept the field — it shares the spelling but not
+#: the prefix, which is why this matches a prefix and not the ``mistral`` substring.
+REJECTS_REASONING_EFFORT_PREFIXES: tuple[str, ...] = ("ministral-",)
+
+
+def _rejects_reasoning_effort(model: str | None) -> bool:
+    """True when ``model``'s endpoint 400s on any ``reasoning_effort`` value.
+
+    Matched on the bare segment so a ``vendor/model`` slug (``mistralai/ministral-14b-2512``)
+    is recognised, the same normalisation the effort vocabulary uses elsewhere.
+    """
+    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return any(bare.startswith(prefix) for prefix in REJECTS_REASONING_EFFORT_PREFIXES)
+
 
 def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
     """True only for explicit Ollama signatures (port 11434 or an ``ollama`` host label).
@@ -68,6 +88,12 @@ class CustomProfile(ProviderProfile):
         # the main loop after the route rejected the reasoning field — an unset main
         # effort arrives here already filled by default_reasoning_config). Never emit
         # think=True (Ollama-only flag).
+        #
+        # Models that reject the field wholesale skip the whole block (#119249): the
+        # disable alias 400s exactly like a graded level, so gating only "none" would
+        # leave the default path still failing.
+        if _rejects_reasoning_effort(ctx.get("model")):
+            return extra_body, top_level
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
