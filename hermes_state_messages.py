@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from agent.context_compressor import (
     _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY, MODEL_ONLY_DISPLAY_METADATA_KEY, _is_checkpoint_item,
     _newest_checkpoint_carrier, split_user_originated_turn)
+from agent.conversation_compression_archive import ABSORBED_ROW_IDS
 from agent.memory_context import sanitize_context
 from agent.message_metadata import (
     CANONICAL_ROW, DB_ROW_SNAPSHOT, MESSAGE_UID, TOOL_CALL_UID, TOOL_CALL_UIDS,
@@ -750,6 +751,12 @@ class SessionMessagesMixin(SessionDetachedResultsMixin):
             msg["timestamp"] = message_timestamp
             if cur.lastrowid is not None:
                 msg["_row_id"] = cur.lastrowid
+                # This dict is now its own durable row, so the merge run it was written from is spent: the
+                # ids name rows this very commit archives, and a reader that counts a carrier's run rather
+                # than the active set (`methods_prompt._archived_user_turns`) would double-count them.
+                # The stamp is read by the commit BEFORE the insert (`_proved_coverage`), so dropping it
+                # here loses nothing the archive needs.
+                msg.pop(ABSORBED_ROW_IDS, None)
             inserted += 1
             tool_calls_total += _tool_calls_count(tool_calls)
             now_ts = max(now_ts, message_timestamp) + 1e-6
