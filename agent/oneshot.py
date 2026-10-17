@@ -13,6 +13,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+from agent.compression_marker import elide
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ PromptTemplate = Callable[[dict[str, Any]], tuple[str, str]]
 
 def _truncate(text: str, limit: int) -> str:
     text = text or ""
-    return text if len(text) <= limit else text[:limit].rstrip() + "\n…(truncated)"
+    return elide(text, limit)
 
 
 _COMMIT_INSTRUCTIONS = (

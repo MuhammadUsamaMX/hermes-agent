@@ -19,6 +19,7 @@ from hermes_constants import (
     get_hermes_home, get_scratch_dir, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
 )
 
+from agent.compression_marker import elide_middle
 from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
@@ -1514,12 +1515,14 @@ def _truncate_content(
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
     omitted = _omitted_headings(content, head_chars, len(content) - tail_chars)
     sections = f" Omitted sections: {'; '.join(omitted)}." if omitted else ""
-    marker = (
-        f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of {len(content)} chars. The middle is "
-        f"omitted.{sections} If you need the full instructions, read the complete file with the read_file "
-        f"tool: {read_path or filename}]\n\n"
+    # The elision itself is minted by the shared non-imitable marker (#121548); the
+    # remedy stays outside it so the model still learns how to recover the file.
+    note = (
+        f"\n\nNote: the middle of {filename} is elided above ({head_chars}+{tail_chars} of "
+        f"{len(content)} chars kept).{sections} If you need the full instructions, read the "
+        f"complete file with the read_file tool: {read_path or filename}"
     )
-    return content[:head_chars] + marker + content[-tail_chars:]
+    return elide_middle(content, head_chars, tail_chars) + note
 
 
 def _omitted_headings(content: str, start: int, end: int, limit: int = 15) -> list:

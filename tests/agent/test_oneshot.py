@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.oneshot import (
     render_template,
     run_oneshot,
@@ -60,5 +61,6 @@ class TestHelpers:
 
     def test_truncate_over_limit_marks_truncation(self):
         out = _truncate("x" * 200, 50)
-        assert out.endswith("…(truncated)")
+        # #121548: the elision marker is non-imitable and caught by the dispatch guard.
+        assert _COMPRESSION_MARKER_RE.search(out)
         assert len(out) < 200

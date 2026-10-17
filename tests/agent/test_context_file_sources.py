@@ -67,7 +67,7 @@ def test_truncated_and_suppressed_statuses_follow_the_builder(project, monkeypat
     home = tmp_path_factory.mktemp("home")
     entry = _by_label(list_context_file_sources(cwd=str(project), home_override=home))["AGENTS.md"]
     assert entry["status"] == "truncated" and entry["loaded"] is True
-    assert "[...truncated AGENTS.md" in build_context_files_prompt(cwd=str(project), home_override=home)
+    assert "⟪HERMES-CONTEXT-COMPRESSION:" in build_context_files_prompt(cwd=str(project), home_override=home)
 
     # Install-tree guard: a fallback cwd (cwd=None) inside the Hermes tree lists the file but never loads it.
     monkeypatch.setattr("agent.runtime_cwd._is_install_tree", lambda _p: True)
@@ -110,6 +110,8 @@ def test_truncation_marker_names_the_omitted_sections_only():
         f"### Lost subsection\n{pad}\n{pad}\n## Kept tail\nshort\n"
     )
     out = _truncate_content(content, "AGENTS.md", max_chars=2500, queue_warning=False)
-    marker = out[out.index("[...truncated"):out.index("]", out.index("[...truncated"))]
-    assert "Lost section; Lost subsection" in marker
-    assert "Kept head" not in marker and "Kept tail" not in marker and "shell comment" not in marker
+    # #121548: the elision marker is non-imitable, so the omitted-sections disclosure
+    # lives in the trailing note that also tells the model how to recover the file.
+    note = out[out.index("\n\nNote: the middle of"):]
+    assert "Lost section; Lost subsection" in note
+    assert "Kept head" not in note and "Kept tail" not in note and "shell comment" not in note

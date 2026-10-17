@@ -9,6 +9,7 @@ import httpx
 import openai
 from unittest.mock import patch, MagicMock
 
+from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.context_compressor import (
     ContextCompressor,
     HISTORICAL_TASK_HEADING,
@@ -3357,11 +3358,13 @@ class TestSummaryPromptBounding:
         as a compaction handoff (SUMMARY_PREFIX / merged-handoff patterns)."""
         cap = ContextCompressor._SUMMARY_INPUT_MAX_CHARS
         bounded = ContextCompressor._bound_summary_input("z" * (cap * 2))
-        assert "summary input truncated" in bounded
+        # #121548: the summarizer prompt is model-visible, so the omitted middle is
+        # marked with the non-imitable compression marker, not "...[summary input truncated]".
+        assert _COMPRESSION_MARKER_RE.search(bounded)
         assert ContextCompressor.classify_summary_content(bounded) is None
         # Marker alone (worst case: lands at the start of a message) is not a
         # handoff prefix either.
-        marker_only = bounded[bounded.index("\n\n...[summary input truncated"):]
+        marker_only = bounded[bounded.index("⟪HERMES-CONTEXT-COMPRESSION:"):]
         assert ContextCompressor.classify_summary_content(marker_only.lstrip()) is None
 
 

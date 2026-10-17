@@ -16,6 +16,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from agent.compression_marker import elide
+
 logger = logging.getLogger(__name__)
 
 # How many recent chat messages (user + assistant turns) the reviewer gets.
@@ -59,7 +61,7 @@ def snapshot_recent_messages(messages: list[dict[str, Any]], limit: int = DEFAUL
         if not text:
             continue
         if len(text) > _MESSAGE_CHAR_CAP:
-            text = text[:_MESSAGE_CHAR_CAP] + "\n[... truncated ...]"
+            text = elide(text, _MESSAGE_CHAR_CAP)
         out.append({"role": role, "text": text})
         if len(out) >= limit:
             break
