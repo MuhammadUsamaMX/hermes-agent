@@ -1437,6 +1437,56 @@ class TestSenderAuthentication(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
 
+    def test_dkim_without_signing_identity_does_not_trust_visible_from(self):
+        """A dkim clause naming no signing identity must not fall back to the visible From.
+
+        ``header.from`` mirrors the attacker-controlled ``From:`` line, so a ``dkim=pass`` clause that
+        carries only ``header.from`` authenticates the address the attacker already chose
+        (GHSA-rxqh-5572-8m77 residual, item 1). The clause must stay unauthenticated.
+        """
+        ok, reason = self._verify(
+            "admin@example.com",
+            ["mx.ourserver.com; dkim=pass header.from=example.com"],
+        )
+        self.assertFalse(ok, reason)
+
+    def test_provider_alias_properties_authenticate(self):
+        """Real providers stamp non-RFC names: NetEase/163 uses smtp.mail and header.i.
+
+        The property set must read those aliases or those legitimate senders fail closed (item 6).
+        """
+        for clause in (
+            "mx.ourserver.com; dkim=pass header.i=@163.com",            # NetEase DKIM
+            "mx.ourserver.com; spf=pass smtp.mail=user@163.com",        # NetEase SPF
+            "mx.ourserver.com; spf=pass return-path=user@example.com",
+            "mx.ourserver.com; spf=pass mailfrom=user@example.com",
+        ):
+            with self.subTest(clause=clause):
+                ok, reason = self._verify("user@163.com" if "163.com" in clause else "user@example.com", [clause])
+                self.assertTrue(ok, reason)
+
+    def test_sender_written_headers_never_become_a_dkim_identity(self):
+        """header.from and header.sender both mirror headers the sender wrote (RFC 8601 §3.3.3).
+
+        Neither is a DKIM signing identity, so a dkim=pass clause carrying only those must not authenticate -
+        the same attacker-picks-the-Address case as GHSA-rxqh-5572-8m77.
+        """
+        for prop in ("header.from", "header.sender"):
+            with self.subTest(prop=prop):
+                ok, reason = self._verify(
+                    "admin@example.com",
+                    [f"mx.ourserver.com; dkim=pass {prop}=example.com"],
+                )
+                self.assertFalse(ok, reason)
+
+    def test_provider_alias_misaligned_rejected(self):
+        """Widening the property set must not widen the trust: the alias domain still has to align."""
+        ok, reason = self._verify(
+            "user@outlook.com",
+            ["mx.ourserver.com; spf=pass smtp.mail=spoof@163.com; dkim=pass header.i=@163.com"],
+        )
+        self.assertFalse(ok, reason)
+
 
 def test_oversized_cron_output_is_delivered_as_one_whole_email():
     """No 4000-char truncation footer pointing at a file on the gateway host: the router hands

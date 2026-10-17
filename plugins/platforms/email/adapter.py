@@ -87,8 +87,8 @@ _MISSING_AUTHSERV_HINT = (" Set EMAIL_AUTHSERV_ID (or platforms.email.authserv_i
 # One token of a clause: a property we read (``header.from=x``; the value may be or contain a quoted-string), or
 # any other whitespace-delimited token consumed whole, so text inside quotes or other values is never read as a prop.
 _QUOTED = r'"(?:[^"\\]|\\.)*"'
-_AUTH_PROP_RE = re.compile(rf'(header\.from|header\.d|smtp\.mailfrom|smtp\.from|envelope-from)\s*=\s*((?:{_QUOTED}|[^\s";])+)'
-                           rf'|(?:{_QUOTED}|[^\s"])+', re.IGNORECASE)
+_AUTH_PROP_RE = re.compile(rf'(header\.from|header\.d|header\.i|header\.sender|smtp\.mailfrom|smtp\.mail|smtp\.from|envelope-from|mailfrom|return-path)\s*=\s*((?:{_QUOTED}|[^\s";])+)'
+                           rf'|(?:{_QUOTED}|[^"\s"])+', re.IGNORECASE)
 
 
 def _esecret_int(name: str, default: int) -> int:
@@ -369,7 +369,8 @@ def _verify_sender_authentication(msg: email_lib.message.Message, from_addr: str
     ``Authentication-Results`` header stamped by the *receiving* server. It prepends, so only the
     FIRST instance is authoritative, and it must match the required, already-normalised *authserv_id* exactly. A matching id is a
     pin, not proof of provenance: the receiving MTA must strip inbound results claiming its id (RFC 8601).
-    True on DMARC pass, aligned SPF pass, or aligned DKIM (``header.d``) pass. No header or no pin → fail-closed
+    True on DMARC pass, aligned SPF pass, or aligned DKIM (``header.d``/``header.i``) pass. A dkim clause that
+    names no signing identity authenticates nothing. No header or no pin → fail-closed
     (opt out via ``EmailAdapter._require_authenticated_sender``)."""
     from_domain = _domain_of(from_addr)
     if not from_domain:
@@ -401,12 +402,16 @@ def _verify_sender_authentication(msg: email_lib.message.Message, from_addr: str
     # every header.from in the dmarc clause must be the From domain we parsed (absent header.from: trust the verdict)
     if any(r == "pass" and aligned(props, ("header.from",), required=False) for r, props in results["dmarc"]):
         return True, "dmarc=pass"
-    # one SMTP transaction has one MAIL FROM verdict: a second spf clause means the SPF signal is not trusted
+    # one SMTP transaction has one MAIL FROM verdict: a second spf clause means the SPF signal is not trusted.
+    # the property names are the RFC 8601 smtp.mailfrom/smtp.from/envelope-from plus the aliases real providers stamp.
     if len(results["spf"]) == 1 and (spf := results["spf"][0])[0] == "pass" and aligned(
-            spf[1], ("smtp.mailfrom", "smtp.from", "envelope-from")):
+            spf[1], ("smtp.mailfrom", "smtp.mail", "smtp.from", "envelope-from", "mailfrom", "return-path")):
         return True, "spf=pass aligned"
-    # several dkim clauses are normal (one per signature): any single pass whose own header.d aligns is enough
-    if any(r == "pass" and aligned(props, ("header.d",) if any(p == "header.d" for p, _ in props) else ("header.from",))
+    # several dkim clauses are normal (one per signature): any single pass whose own signing identity aligns is enough.
+    # No header.d and no header.i means the clause names no signing identity at all: header.from only mirrors the
+    # attacker-controlled From, so trusting it authenticates the address the attacker already picked
+    # (GHSA-rxqh-5572-8m77 residual). Such a clause stays unauthenticated.
+    if any(r == "pass" and aligned(props, ("header.d", "header.i") if any(p in ("header.d", "header.i") for p, _ in props) else ())
            for r, props in results["dkim"]):
         return True, "dkim=pass aligned"
     return False, f"authentication failed ({trusted[:120]})"
