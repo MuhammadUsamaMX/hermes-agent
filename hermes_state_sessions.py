@@ -1011,6 +1011,23 @@ class SessionSessionsMixin:
         combined = " AND ".join(clauses)
         return (f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"), params
 
+    def _lineage_active_message_counts(self, session_ids: List[str]) -> Dict[str, int]:
+        """Active message rows per session for a batch of ids (chunked, never one query per row).
+
+        ``sessions.message_count`` counts ACTIVE rows only (compaction/rewind leave dropped
+        turns as ``active = 0``), so this is the like-for-like source for a lineage total.
+        """
+        counts: Dict[str, int] = {}
+        for chunk in _id_chunks(list(dict.fromkeys(session_ids))):
+            ph = _session_ids_placeholders(chunk)
+            for row in self._read_all(
+                "SELECT session_id, COUNT(*) AS active_rows FROM messages "
+                f"WHERE active = 1 AND session_id IN ({ph}) GROUP BY session_id",
+                chunk,
+            ):
+                counts[row["session_id"]] = int(row["active_rows"])
+        return counts
+
     def _project_compression_tips(self, sessions: List[Dict[str, Any]], compact_rows: bool) -> List[Dict[str, Any]]:
         """Replace each compression root's surfaced fields with its live tip's (root ``started_at`` kept
         for stable ordering), one batched query. ``_lineage_ids`` carries every chain id (a tile may
@@ -1026,6 +1043,13 @@ class SessionSessionsMixin:
                 {chain[-1] for chain in chain_by_root.values()}, compact_rows=compact_rows,
             ) if chain_by_root else {}
         )
+        # The projected row stands for the WHOLE conversation, so its count must total the
+        # lineage. Surfacing the tip's own count made a long chat that rotated through several
+        # segments read as far smaller than it was — users saw a fraction of the messages they
+        # had written and read the thread as truncated/apparently lost (#90165).
+        lineage_counts = self._lineage_active_message_counts(
+            [sid for chain in chain_by_root.values() for sid in chain]
+        ) if chain_by_root else {}
         projected = []
         for s in sessions:
             chain = chain_by_root.get(s["id"])
@@ -1040,6 +1064,12 @@ class SessionSessionsMixin:
             ):
                 if key in tip_row:
                     merged[key] = tip_row[key]
+            if chain:
+                # Guard on >0: a lineage whose segments report no active rows keeps the tip's
+                # own counter rather than being blanked by a count that read nothing.
+                lineage_total = sum(lineage_counts.get(sid, 0) for sid in chain)
+                if lineage_total > 0:
+                    merged["message_count"] = lineage_total
             if merged.get("title") is None:
                 # The title is carried root->tip AFTER the publish transaction; a rotation cut off in
                 # between leaves it on the ended root, and exact-title lookups (`hermes peer dm` ->

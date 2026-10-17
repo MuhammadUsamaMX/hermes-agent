@@ -3363,6 +3363,54 @@ class TestCompressionChainProjection:
         assert tip_row["ended_at"] is None  # tip is still live
         assert tip_row["end_reason"] is None
 
+    def test_list_message_count_covers_the_whole_lineage(self, db):
+        """A projected row stands for the WHOLE conversation, so ``message_count``
+        must total every segment's active rows — not the newest segment's alone.
+
+        #90165: the sessions list surfaced the tip's count, so a long chat that
+        rotated through several segments read as far smaller than it was
+        (users saw ~120 for a conversation holding thousands of messages) and
+        the chat looked truncated/apparently lost.
+        """
+        import time as _time
+        t0 = _time.time() - 7200
+
+        db.create_session("cnt_root", "cli")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "cnt_root"))
+        db.append_messages_batch("cnt_root", [
+            {"role": "user", "content": f"root turn {i}"} for i in range(3)])
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "cnt_root"),
+        )
+
+        db.create_session("cnt_mid", "cli", parent_session_id="cnt_root")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "cnt_mid"))
+        db.append_messages_batch("cnt_mid", [
+            {"role": "user", "content": f"mid turn {i}"} for i in range(4)])
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 20, "cnt_mid"),
+        )
+
+        db.create_session("cnt_tip", "cli", parent_session_id="cnt_mid")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 21, "cnt_tip"))
+        db.append_messages_batch("cnt_tip", [
+            {"role": "user", "content": f"tip turn {i}"} for i in range(5)])
+
+        # A solo row must keep counting only its own messages.
+        db.create_session("cnt_solo", "cli")
+        db.append_messages_batch("cnt_solo", [
+            {"role": "user", "content": "standalone"} for _ in range(7)])
+        db._conn.commit()
+
+        listed = {s["id"]: s for s in db.list_sessions_rich(source="cli", limit=20)}
+        projected = listed["cnt_tip"]
+        assert projected["_lineage_root_id"] == "cnt_root"
+        # The tip segment alone holds 5; the conversation the row represents holds 3+4+5.
+        assert projected["message_count"] == 12
+        assert listed["cnt_solo"]["message_count"] == 7
+
     def test_list_projects_multiple_independent_chains_in_one_call(self, db):
         """Two unrelated compression chains in the same page must each
         resolve to their own tip, not get cross-mixed by the batched tip-row
