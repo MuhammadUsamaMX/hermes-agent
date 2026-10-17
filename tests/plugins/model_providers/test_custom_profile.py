@@ -313,16 +313,20 @@ class TestMistralRejectsReasoningEffort:
         assert "reasoning_effort" not in kwargs.get("extra_body", {})
 
     def test_title_generation_path_builds_no_reasoning_kwarg(self, custom_profile):
-        """The auxiliary client shares the profile, so the title-generation 400 goes too."""
-        import agent.auxiliary_client as aux
+        """Drive the auxiliary projection seam the reporter's title 400 came through.
 
-        eb, tl = custom_profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "medium"},
-            model="ministral-3b-2512",
-            base_url=MINISTRAL_BASE_URL,
+        Calling the profile directly (as a sibling test does) would only re-prove the
+        unit; ``_project_provider_profile`` is the function auxiliary calls that turns a
+        ``reasoning_config`` into wire kwargs, so it is what has to stay clean.
+        """
+        from agent.auxiliary_client import _project_provider_profile
+
+        projection = _project_provider_profile(
+            "mistral", "custom", "ministral-3b-2512", MINISTRAL_BASE_URL,
+            {"enabled": True, "effort": "medium"},
         )
-        assert (eb, tl) == ({}, {})
-        assert hasattr(aux, "_build_call_kwargs"), "auxiliary projection seam must still exist"
+        assert "reasoning_effort" not in projection.top_level
+        assert "reasoning_effort" not in projection.reasoning_extra
 
     def test_vendor_prefixed_slug_is_still_recognised(self, custom_profile):
         """A ``vendor/model`` slug must be matched on its bare segment."""
