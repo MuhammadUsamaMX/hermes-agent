@@ -393,17 +393,46 @@ def _worker_alive(pid: Optional[int], started_at) -> bool:
     return not _pid_recycled(pid, started_at)
 
 
+def _fingerprints_agree(recorded: str, current: Optional[str]) -> bool:
+    """Same process identity from two ``"<epoch>|<start time>"`` fingerprints: the instantiation epoch
+    matches exactly AND the start time agrees within the shared same-host drift tolerance.
+
+    ``get_process_start_time`` readings drift by ~1 s between the claim-time and a later liveness read
+    (macOS ``kern.boottime`` adjustment after a sleep/wake cycle) — the same drift every sibling
+    reconciler absorbs through ``start_time_fingerprints_match`` (#117505). Exact string equality on the
+    composed fingerprint turned that drift into a false "recycled" verdict, so
+    ``_terminate_reclaimed_worker`` reported ``terminated`` while signalling nothing and the stale-claim
+    reaper released a live worker's claim, spawning a duplicate beside it (#118326).
+
+    The epoch half stays an exact comparison: it changes only across a reboot / container recreate,
+    which genuinely does make the PID a stranger's. An unreadable (``None``) or malformed reading
+    agrees with nothing — signalling a stranger is worse than deferring one tick.
+    """
+    if current is None:
+        return False
+    recorded_epoch, _, recorded_start = str(recorded).rpartition("|")
+    current_epoch, _, current_start = str(current).rpartition("|")
+    if recorded_epoch != current_epoch:
+        return False
+    from gateway.status import start_time_fingerprints_match
+    try:
+        return start_time_fingerprints_match(recorded_start, current_start)
+    except (TypeError, ValueError):
+        return False
+
+
 def _pid_recycled(pid: Optional[int], started_at) -> bool:
     """True when a live ``pid`` is NOT the process fingerprinted at spawn (or the fingerprint can no
     longer be read). Signalling it would hit a stranger. ``None`` fingerprint = legacy row, never
-    recycled; the UNVERIFIED marker is always foreign. An integer fingerprint (rows written before the
-    boot witness was added) compares the start time only."""
+    recycled; the UNVERIFIED marker is always foreign. A composite fingerprint compares its
+    instantiation epoch exactly and its start time within the shared drift tolerance (#118326). An
+    integer fingerprint (rows written before the boot witness was added) compares the start time only."""
     if started_at is None or not pid:
         return False
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
+        return not _fingerprints_agree(started_at, _process_fingerprint(int(pid)))
     from gateway.status import _start_times_agree, get_process_start_time
     current = get_process_start_time(int(pid))
     if current is None:
