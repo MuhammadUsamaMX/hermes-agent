@@ -103,3 +103,86 @@ def _is_marker(entry: dict) -> bool:
     from tui_gateway.server import _is_model_switch_marker
 
     return _is_model_switch_marker(entry)
+
+
+class TestModelSwitchMarkerIsStampedLikeAFlushedRow:
+    """#121734: the marker is durable, so it must be stamped like any flushed row.
+
+    The in-place compaction commit archives the rows the compressor held rather than every row
+    up to the newest one, which it can only do when each held dict names its durable row. A
+    marker that persisted a row but left the live entry unstamped reads as an unpersisted turn:
+    the commit cannot name it and falls back to the watermark, archiving turns the compressor
+    never saw. This is the invariant #121780 added the stamping for, and main had no direct
+    test binding it.
+    """
+
+    @staticmethod
+    def _session_with_db(db, session_key: str = "sess-marker") -> dict:
+        class _Agent:
+            def __init__(self, session_db):
+                self._session_db = session_db
+                self.session_id = session_key
+
+        return {"session_key": session_key, "history": [], "agent": _Agent(db)}
+
+    def test_entry_names_its_durable_row(self, tmp_path) -> None:
+        """The entry carries both halves of the flushed-row stamp: row id and persisted marker."""
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session("sess-marker", source="cli")
+            session = self._session_with_db(db)
+
+            _append_model_switch_marker(session, model="gpt-4o", provider="openai")
+
+            entry = _markers_of(session)[0]
+            assert isinstance(entry.get("_row_id"), int) and entry["_row_id"] > 0, (
+                f"the marker must name the durable row it wrote: {entry.get('_row_id')!r}"
+            )
+            assert entry.get(_DB_PERSISTED_MARKER) is True, (
+                "without the persisted marker the commit reads the durable marker as an "
+                "unpersisted turn and falls back to the watermark"
+            )
+            rows = db.get_messages_as_conversation("sess-marker", include_row_ids=True)
+            assert [row.get("_row_id") for row in rows] == [entry["_row_id"]], (
+                "the stamped id must be the row the marker actually persisted"
+            )
+            assert rows[0].get("display_kind") == "model_switch"
+        finally:
+            db.close()
+
+    def test_stamped_marker_counts_as_exact_held_coverage(self, tmp_path) -> None:
+        """The stamped id is what the commit uses to hold the marker exactly, not positionally."""
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+        from agent.conversation_compression_archive import newest_exact_held_id
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session("sess-marker", source="cli")
+            session = self._session_with_db(db)
+            _append_model_switch_marker(session, model="gpt-4o", provider="openai")
+            entry = _markers_of(session)[0]
+            # A real flushed row carries the marker too; the model-switch entry is no different.
+            entry[_DB_PERSISTED_MARKER] = entry.get(_DB_PERSISTED_MARKER)
+
+            assert newest_exact_held_id([entry]) == entry["_row_id"], (
+                "the commit caps coverage by this id, so it must resolve to the marker's own row"
+            )
+        finally:
+            db.close()
+
+    def test_an_unstamped_marker_is_not_exact_coverage(self, tmp_path) -> None:
+        """The stamp is load-bearing: without it the id is ignored, not merely advisory."""
+        from agent.conversation_compression_archive import newest_exact_held_id
+
+        entry = {"role": "user", "content": "marker", "_row_id": 7}
+        assert newest_exact_held_id([entry]) is None, (
+            "an unstamped row id must not be treated as held coverage"
+        )
+
+
+def _markers_of(session: dict) -> list:
+    return [h for h in session["history"] if _is_marker(h)]
