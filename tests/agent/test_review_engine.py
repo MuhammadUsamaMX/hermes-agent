@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent import review_engine as re_mod
+from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.review_engine import (
     build_review_task,
     format_dispatch_note,
@@ -79,7 +80,9 @@ def test_snapshot_caps_oversized_messages():
     msgs = [{"role": "user", "content": "x" * 50_000}]
     snap = snapshot_recent_messages(msgs)
     assert len(snap[0]["text"]) < 13_000
-    assert snap[0]["text"].endswith("[... truncated ...]")
+    # #121548: the review snapshot is model-visible, so it carries the non-imitable
+    # marker rather than the bare "...[truncated]" idiom.
+    assert _COMPRESSION_MARKER_RE.search(snap[0]["text"])
 
 # ---------------------------------------------------------------------------
 # build_review_task

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
@@ -125,7 +126,9 @@ class TestTruncateContent:
         content = "x" * (CONTEXT_FILE_MAX_CHARS + 1000)
         result = _truncate_content(content, "big.md")
         assert len(result) < len(content)
-        assert "truncated" in result.lower()
+        # #121548: context files are inlined into the system prompt, so the elision
+        # marker must be the non-imitable one, never a bare "...[truncated]".
+        assert _COMPRESSION_MARKER_RE.search(result)
 
 
 
@@ -195,7 +198,7 @@ class TestDynamicContextFileCap:
         content = "z" * 30_000
         small = _truncate_content(content, "AGENTS.md", context_length=8_000)
         big = _truncate_content(content, "AGENTS.md", context_length=200_000)
-        assert "truncated" in small.lower()
+        assert _COMPRESSION_MARKER_RE.search(small)
         assert big == content
 
 

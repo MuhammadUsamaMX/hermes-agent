@@ -15,6 +15,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.context_compressor import (
     ContextCompressor,
     _LEAN_ANCHOR_HEADING,
@@ -160,7 +161,8 @@ class TestSampledSummaryInput:
             c._generate_summary(turns)
         assert mock_call.call_count == 1
         prompt = mock_call.call_args.kwargs["messages"][0]["content"]
-        assert "summary input truncated" in prompt
+        # #121548: the elision marker is the non-imitable compression marker.
+        assert _COMPRESSION_MARKER_RE.search(prompt)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
+from agent.compression_marker import elide
 from agent.usage_pricing import normalize_usage
 
 _SENSITIVE_HOOK_KEYS = {"api_key", "authorization", "proxy_authorization", "cookie", "set_cookie"}
@@ -73,9 +74,7 @@ class ApiRequestHooksMixin:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, str):
-            if len(value) > max_string:
-                return value[:max_string] + f"...[truncated {len(value) - max_string} chars]"
-            return value
+            return elide(value, max_string)
         if isinstance(value, (bytes, bytearray)):
             return f"<{len(value)} bytes>"
 

@@ -3680,23 +3680,19 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
     @classmethod
     def _bound_summary_input(cls, content: str) -> str:
         """Cap total summarizer input, keeping head and tail and marking the omitted middle."""
-        if len(content) <= cls._SUMMARY_INPUT_MAX_CHARS:
+        limit = cls._SUMMARY_INPUT_MAX_CHARS
+        if len(content) <= limit:
             return content
 
-        marker_template = (
-            "\n\n...[summary input truncated: omitted "
-            "{omitted:,} chars from the middle to keep compression prompt bounded]...\n\n"
-        )
-        # Marker width can change with the omitted count; estimate, then rebuild once.
-        omitted = len(content)
-        for _ in range(2):
-            marker = marker_template.format(omitted=omitted)
-            remaining = max(cls._SUMMARY_INPUT_MAX_CHARS - len(marker), 0)
-            head_chars = int(remaining * 0.45)
-            tail_chars = remaining - head_chars
-            omitted = max(len(content) - head_chars - tail_chars, 0)
-        tail = content[-tail_chars:].lstrip() if tail_chars else ""
-        return content[:head_chars].rstrip() + marker + tail
+        # Same head/tail reserve as _bound_oversized_record. The elision marker is
+        # non-imitable (#121548): this text goes into the summarizer's prompt, so
+        # a bare "...[truncated]" here is an imitation surface like any other.
+        marker_reserve = len(_elision_marker(omitted=len(content), total=len(content)))
+        if limit <= marker_reserve:
+            return content[:limit]
+        remaining = limit - marker_reserve
+        head_chars = int(remaining * 0.45)
+        return elide_middle(content, head_chars, remaining - head_chars).rstrip()
 
     # Lean-mode sampling slice count: 8 keeps slices ~20K chars at the 160K cap.
     _SAMPLED_INPUT_SLICES = 8
