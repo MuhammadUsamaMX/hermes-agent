@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import hermes_cli.kanban_db as _kb
 
+from agent.compression_marker import elide
+
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Attachment, Comment, Task
 
@@ -28,13 +30,10 @@ _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 
 def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
-    """Truncate to ``limit`` chars with a visible ellipsis."""
+    """Cap to ``limit`` chars with a visible ellipsis."""
     if not s:
         return ""
-    s = s.strip()
-    if len(s) <= limit:
-        return s
-    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+    return elide(s.strip(), limit)
 
 
 def _ctx_stamp(ts: int, now: int) -> str:

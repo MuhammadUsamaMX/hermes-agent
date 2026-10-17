@@ -22,6 +22,8 @@ from typing import Callable, Dict, List, Optional, Set
 
 from hermes_constants import hermes_home_key, normalize_scope
 
+from agent.compression_marker import elide
+
 logger = logging.getLogger(__name__)
 
 _session_tool_scope = ContextVar("session_tool_scope", default=None)
@@ -49,7 +51,6 @@ def _session_slot_key():
 
 # Cap on a tool error body; only trims runaway interpolated exceptions (static msgs are ~115 chars).
 _MAX_TOOL_ERROR_CHARS = 2048
-_TOOL_ERROR_TRUNCATION_MARKER = "… [truncated]"
 # Logs keep more of the body than the model sees, but still a bounded amount.
 _MAX_LOGGED_ERROR_CHARS = 8192
 
@@ -61,7 +62,7 @@ def _bound_error_text(text: str) -> str:
     logger.debug(
         "tool error body truncated for context (%d chars): %s",
         len(text), text[:_MAX_LOGGED_ERROR_CHARS])
-    return text[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
+    return elide(text, _MAX_TOOL_ERROR_CHARS)
 
 
 def _bound_json_error_result(result: str) -> str:

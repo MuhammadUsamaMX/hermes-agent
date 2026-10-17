@@ -12,6 +12,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
+from agent.compression_marker import elide
+
 from gateway.platforms._shared import coerce_port as _coerce_int, get_scoped_secret as _get_scoped_secret
 
 from . import protocol, security
@@ -232,7 +234,7 @@ def a2a_history(args: dict, **_: Any) -> str:
     lines = [f"Conversation {context_id} (last {len(messages)} messages):"]
     for m in messages:
         text = (m.get("text") or "").strip()
-        lines.append(f"[{m.get('role', '?')}] {text[:1000] + ' …[truncated]' if len(text) > 1000 else text}")
+        lines.append(f"[{m.get('role', '?')}] {elide(text, 1000)}")
     return "\n".join(lines)
 
 

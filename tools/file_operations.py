@@ -24,6 +24,7 @@ from typing import Optional, Dict
 from pathlib import Path
 
 from tools.binary_extensions import has_binary_extension
+from agent.compression_marker import elide
 from agent.file_safety import get_write_denied_error
 from tools.file_operations_common import (
     ExecuteResult, PatchResult, ReadResult, SearchResult, WriteResult,
@@ -498,7 +499,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         # blank line in a page keeps its own number.
         content = content.removesuffix('\n')
         return '\n'.join(
-            f"{i}|{line if len(line) <= max_line_length else line[:max_line_length] + '... [truncated]'}"
+            f"{i}|{elide(line, max_line_length)}"
             for i, line in enumerate(content.split('\n'), start=start_line))
 
     def _expand_path(self, path: str) -> str:

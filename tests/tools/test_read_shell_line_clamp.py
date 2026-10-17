@@ -11,11 +11,12 @@ multibyte UTF-8 codepoint at the boundary. The transport decodes with
 errors="replace", turning a split into U+FFFD; the budget of
 4*max_line_length+1 bytes guarantees at least max_line_length+1 decoded chars
 survive for any over-long line, so the Python clamp always fires, always
-appends "... [truncated]", and always removes any boundary U+FFFD (it can
-only appear past char max_line_length).
+appends the guarded compression marker, and always removes any boundary U+FFFD
+(it can only appear past char max_line_length).
 """
 
 import os
+import re
 import sys
 
 import pytest
@@ -26,10 +27,26 @@ from tools.environments.local import LocalEnvironment
 from tools.file_operations import ShellFileOperations
 from tools.tool_output_limits import get_max_line_length
 
+# #121572: any rendering of the bare truncation idiom, e.g. "…[truncated]".
+IMITABLE_IDIOM_RE = re.compile(r"(?:…|\.\.\.)\s*[\[(][^\])]{0,200}?truncat")
+
 
 @pytest.fixture
 def ops():
     return ShellFileOperations(LocalEnvironment())
+
+
+def assert_clamped_with_guarded_marker(line: str, gutter: str, max_len: int) -> None:
+    """The clamped line keeps its gutter, mints the guarded marker, and respects the cap.
+
+    Asserted structurally rather than against ``elide()``'s own output so the test
+    would still fail if the renderer regressed to any other marker.
+    """
+    assert line.startswith(gutter), line[-200:]
+    body = line[len(gutter):]
+    assert "chars omitted" in body, body[-200:]
+    assert not IMITABLE_IDIOM_RE.search(body), body[-200:]
+    assert len(body) <= max_len
 
 
 def test_monster_line_clamped_in_shell(tmp_path, ops):
@@ -44,7 +61,7 @@ def test_monster_line_clamped_in_shell(tmp_path, ops):
     result = ops.read_file(str(monster))
     assert result.error is None
     lines = result.content.split("\n")
-    assert lines[0] == "1|" + "x" * max_len + "... [truncated]"
+    assert_clamped_with_guarded_marker(lines[0], "1|", max_len)
     assert lines[1] == "2|after"
     # Sanity: the whole result stays tiny relative to the 5MB line.
     assert len(result.content) < max_len + 200
@@ -91,8 +108,8 @@ def test_utf8_multibyte_boundary_no_mojibake(tmp_path, ops):
     result = ops.read_file(str(p))
     assert result.error is None
     lines = result.content.split("\n")
-    assert lines[0] == "1|" + "é" * max_len + "... [truncated]"
-    assert "\ufffd" not in result.content
+    assert_clamped_with_guarded_marker(lines[0], "1|", max_len)
+    assert "�" not in result.content
     assert lines[1] == "2|second"
 
 
@@ -110,8 +127,9 @@ def test_multibyte_line_over_limit_still_marked_truncated(tmp_path, ops):
 
     result = ops.read_file(str(p))
     assert result.error is None
-    first = result.content.split("\n")[0]
-    assert first == "1|" + "é" * max_len + "... [truncated]"
+    lines = result.content.split("\n")
+    assert_clamped_with_guarded_marker(lines[0], "1|", max_len)
+    assert "�" not in lines[0]
 
 
 def test_read_file_raw_not_clamped(tmp_path, ops):

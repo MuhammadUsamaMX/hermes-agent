@@ -21,6 +21,8 @@ from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.compression_marker import elide
+
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_time import safe_strftime
 
@@ -711,7 +713,7 @@ def migrate_goal_to_session(old_session_id: str, new_session_id: str, *, reason:
 def _truncate(text: str, limit: int) -> str:
     if not text:
         return ""
-    return text if len(text) <= limit else text[:limit] + "… [truncated]"
+    return elide(text, limit)
 
 
 def _pid_alive(pid: int) -> bool:

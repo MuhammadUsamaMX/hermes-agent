@@ -29,6 +29,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Uni
 from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
 from registration_lifecycle import replacement_coordinator
 from utils import env_var_enabled
+from agent.compression_marker import elide
+
 from hermes_cli.config import load_config_readonly
 from hermes_cli.middleware import VALID_MIDDLEWARE
 from hermes_cli.plugin_capabilities import plugin_capability_granted
@@ -544,7 +546,7 @@ class PluginContext:
             raw = "" if raw is None else str(raw)
         truncated = len(raw) > cls._MCP_RESULT_CHAR_CAP
         if truncated:
-            raw = raw[: cls._MCP_RESULT_CHAR_CAP] + "… [truncated]"
+            raw = elide(raw, cls._MCP_RESULT_CHAR_CAP)
         try:
             parsed: Any = json.loads(raw)
         except (ValueError, TypeError):

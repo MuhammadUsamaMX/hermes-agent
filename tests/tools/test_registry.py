@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import threading
 from unittest.mock import patch
 
@@ -14,6 +15,19 @@ from tools.registry import (
     discover_builtin_tools,
     tool_error,
 )
+
+# #121572: any rendering of the bare truncation idiom, e.g. "…[truncated]".
+IMITABLE_IDIOM_RE = re.compile(r"(?:…|\.\.\.)\s*[\[(][^\])]{0,200}?truncat")
+
+
+def assert_guarded_elision(text: str) -> None:
+    """The body was elided through the guarded marker, not the imitable bare idiom.
+
+    Asserted structurally so the test still fails if the renderer regresses to any
+    other marker shape (#121572).
+    """
+    assert "chars omitted" in text, text[-200:]
+    assert not IMITABLE_IDIOM_RE.search(text), text[-200:]
 
 
 def _dummy_handler(args, **kwargs):
@@ -163,8 +177,8 @@ class TestToolErrorBounding:
 
     def test_oversized_body_truncated(self):
         result = json.loads(tool_error("boom: " + "X" * 5000))
-        assert result["error"].endswith("… [truncated]")
-        assert len(result["error"]) <= _MAX_TOOL_ERROR_CHARS + len("… [truncated]")
+        assert_guarded_elision(result["error"])
+        assert len(result["error"]) <= _MAX_TOOL_ERROR_CHARS
 
     def test_at_limit_not_truncated(self):
         msg = "Y" * _MAX_TOOL_ERROR_CHARS
@@ -212,8 +226,8 @@ class TestDispatchBoundsDirectErrorResults:
             "duration_seconds": 1.2,
         }, ensure_ascii=False))
         result = json.loads(reg.dispatch("direct", {}))
-        assert result["error"].endswith("… [truncated]")
-        assert len(result["error"]) <= _MAX_TOOL_ERROR_CHARS + len("… [truncated]")
+        assert_guarded_elision(result["error"])
+        assert len(result["error"]) <= _MAX_TOOL_ERROR_CHARS
         assert result["status"] == "error"
         assert result["tool_calls_made"] == 3
         assert result["duration_seconds"] == 1.2

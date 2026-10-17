@@ -15,6 +15,8 @@ import copy
 
 from hermes_constants import display_hermes_home
 
+from agent.compression_marker import elide
+
 logger = logging.getLogger(__name__)
 
 # Heartbeat cadence keeping the caller's inactivity watchdog at bay while a manual
@@ -462,7 +464,7 @@ def _latest_job_output_excerpt(job_id: str, max_chars: int = 2000) -> Optional[s
         if not text:
             return None
         if len(text) > max_chars:
-            text = text[:max_chars] + f"\n… (truncated; full output: {files[-1]})"
+            text = elide(text, max_chars) + f"\n(full output: {files[-1]})"
         return text
     except Exception:
         return None

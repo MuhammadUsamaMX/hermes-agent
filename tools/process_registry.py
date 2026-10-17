@@ -30,6 +30,8 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
 
+from agent.compression_marker import elide
+
 from hermes_cli.config import get_hermes_home
 
 from tools.process_registry_notifications import (
@@ -853,7 +855,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 session.notify_on_complete = True
         output = "\n".join(matched_lines[:20])
         if len(output) > 2000:
-            output = output[:2000] + "\n...(truncated)"
+            output = elide(output, 2000)
         if self._global_watch_admit(now):
             notification = {
                 **self._watch_event_base(session),

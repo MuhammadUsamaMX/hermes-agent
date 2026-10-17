@@ -1,8 +1,12 @@
 """Tests for the todo tool module."""
 
 import json
+import re
 
 from tools.todo_tool import TodoStore, todo_tool
+
+# #121572: any rendering of the bare truncation idiom, e.g. "…[truncated]".
+IMITABLE_IDIOM_RE = re.compile(r"(?:…|\.\.\.)\s*[\[(][^\])]{0,200}?truncat")
 
 class TestWriteAndRead:
     def test_write_replaces_list(self):
@@ -169,7 +173,10 @@ class TestTodoStoreBounds:
         store.write([{"id": "1", "content": "A" * 50001, "status": "pending"}])
         item = store.read()[0]
         assert len(item["content"]) <= MAX_TODO_CONTENT_CHARS
-        assert item["content"].endswith("… [truncated]")
+        # #121572: the elision mints the guarded marker, never the imitable bare idiom a
+        # model copies from replayed context into new durable writes (#83435/#83714).
+        assert "chars omitted" in item["content"]
+        assert not IMITABLE_IDIOM_RE.search(item["content"])
 
     def test_injection_block_is_bounded(self):
         from tools.todo_tool import MAX_TODO_CONTENT_CHARS
