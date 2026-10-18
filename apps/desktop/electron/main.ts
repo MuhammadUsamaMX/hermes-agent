@@ -12480,6 +12480,15 @@ function installPreviewGuestEscapeHatch() {
           break
         }
 
+        // #101880: the guest's `print` stub cannot see the chord, because this
+        // never becomes a page-side `print()` call. Swallow it here so
+        // Chromium's handler never builds the panel that segfaults.
+        case 'block-print': {
+          event.preventDefault()
+
+          break
+        }
+
         default:
           break
       }

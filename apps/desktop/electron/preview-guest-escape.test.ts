@@ -22,6 +22,22 @@ describe('previewGuestInputAction', () => {
     expect(previewGuestInputAction({ meta: true, shift: true, key: 'W', type: 'keyDown' }, true)).toBe('close-preview')
   })
 
+  // #101880: ⌘P in a guest builds the same native print panel that segfaults,
+  // and it never passes through the page's own `print()`, so no in-page stub
+  // can catch it. `before-input-event` is the only seam that sees it first.
+  it('blocks the print chord in both the Ctrl and Cmd forms', () => {
+    expect(previewGuestInputAction({ control: true, key: 'p', type: 'keyDown' }, false)).toBe('block-print')
+    expect(previewGuestInputAction({ meta: true, key: 'P', type: 'keyDown' }, true)).toBe('block-print')
+  })
+
+  it('leaves typing P and the other print modifiers to the page', () => {
+    // Plain P is typing.
+    expect(previewGuestInputAction({ key: 'p', type: 'keyDown' }, false)).toBeNull()
+    // ⌘⇧P and friends are not the print chord.
+    expect(previewGuestInputAction({ meta: true, shift: true, key: 'p', type: 'keyDown' }, false)).toBeNull()
+    expect(previewGuestInputAction({ control: true, key: 'p', type: 'keyUp' }, false)).toBeNull()
+  })
+
   it('leaves every other key for the page', () => {
     expect(previewGuestInputAction({ key: 'a', type: 'keyDown' }, true)).toBeNull()
     // Bare W / Ctrl+W without Shift is not the close chord.

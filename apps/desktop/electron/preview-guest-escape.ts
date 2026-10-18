@@ -14,7 +14,7 @@
  * is unit-testable without a live guest.
  */
 
-export type PreviewGuestInputAction = 'close-preview' | 'exit-fullscreen'
+export type PreviewGuestInputAction = 'close-preview' | 'exit-fullscreen' | 'block-print'
 
 /** The subset of Electron's `Input` the decision needs. */
 export interface PreviewGuestInput {
@@ -34,6 +34,11 @@ export interface PreviewGuestInput {
  *   to the page (video players and web UIs use it for their own exits).
  * - Ctrl/Cmd+Shift+W: close the preview pane. This mirrors the host's
  *   close-tab chord so muscle memory works no matter who has focus.
+ * - Ctrl/Cmd+P: block the print chord (#101880). It builds the same native
+ *   print panel that segfaults inside PrintCore, and unlike a page's own
+ *   `print()` call it never passes through page script, so the guest's `print`
+ *   stub cannot catch it — this is the only seam that sees it first.
+ *   Shift-modified forms (Cmd+Shift+P) are somebody else's chord and pass.
  *
  * Returns null when the page should see the key unchanged.
  */
@@ -51,6 +56,12 @@ export function previewGuestInputAction(
 
   if ((input.control || input.meta) && input.shift && input.key.toLowerCase() === 'w') {
     return 'close-preview'
+  }
+
+  // Plain P is typing; only the modifier chord is the print command. Shift is
+  // excluded so Cmd+Shift+P (and friends) still belong to the page.
+  if ((input.control || input.meta) && !input.shift && input.key.toLowerCase() === 'p') {
+    return 'block-print'
   }
 
   return null

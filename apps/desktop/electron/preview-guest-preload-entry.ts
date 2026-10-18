@@ -16,10 +16,19 @@
 // nothing there.
 
 import { installGuestExternalHandoff } from './preview-guest-preload'
+import { installGuestPrintStubInMainWorld } from './preview-guest-print'
 
 const electron = require('electron') as {
+  contextBridge: { executeInMainWorld(executionScript: unknown): unknown }
   ipcRenderer: { sendToHost(channel: string, ...args: unknown[]): void }
 }
+
+// #101880: stub `print` in the guest's MAIN world now, while this preload runs
+// — before the document is parsed and therefore before any page script. The
+// renderer's own guard arms on `dom-ready`, which is too late for a page that
+// ends in a bare `<script>window.print();</script>`; that page called print
+// while parsing and took the app down before the dialog ever appeared.
+electron.contextBridge.executeInMainWorld(installGuestPrintStubInMainWorld)
 
 installGuestExternalHandoff({
   addEventListener: (type, listener, capture) => document.addEventListener(type, listener, capture),

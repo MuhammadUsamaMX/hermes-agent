@@ -248,6 +248,23 @@ function looksBinaryBytes(bytes: Uint8Array) {
   return suspicious / Math.min(bytes.length, 4096) > 0.12
 }
 
+/**
+ * #101880: hide the Chromium PDF viewer's toolbar in the preview iframe.
+ *
+ * That toolbar ships its own Print button, and the viewer's print call never
+ * passes through page script, so no guest-side `print` stub can intercept it —
+ * this is the one trigger the chord blocker and the guest stub cannot reach.
+ * On Electron 40.10.2 the panel it builds segfaults in PrintCore, so the
+ * control is removed rather than left as a crash.
+ *
+ * The fragment is a viewer parameter, not part of the URL's identity: callers
+ * must keep passing the bare blob URL to `revokeObjectURL`, or the document
+ * leaks for the life of the renderer.
+ */
+export function pdfViewerSrc(pdfUrl: string): string {
+  return `${pdfUrl}#toolbar=0`
+}
+
 function dataUrlToBlob(dataUrl: string) {
   const comma = dataUrl.indexOf(',')
 
@@ -1199,7 +1216,7 @@ export function LocalFilePreview({
         <iframe
           aria-label={target.label}
           className="h-full w-full border-0 bg-white"
-          src={pdfUrl}
+          src={pdfViewerSrc(pdfUrl)}
           title={target.label}
         />
       </div>

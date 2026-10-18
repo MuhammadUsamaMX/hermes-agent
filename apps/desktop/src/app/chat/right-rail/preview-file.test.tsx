@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setAlwaysExternalLinks } from '@/store/external-links'
 import { $previewTabs } from '@/store/preview'
 
-import { MarkdownPreview } from './preview-file'
+import { MarkdownPreview, pdfViewerSrc } from './preview-file'
 
 // Behavior tests for the .md file preview renderer: input markdown goes
 // through normalizeFilePreviewMath -> Streamdown (+ KaTeX math plugin) and must
@@ -115,5 +115,22 @@ describe('MarkdownPreview', () => {
 
     expect(container.querySelector('a[href^="javascript:"]')).toBeNull()
     expect($previewTabs.get()).toEqual([])
+  })
+})
+
+// #101880: Chromium's built-in PDF viewer ships its own Print button, and its
+// print call never passes through page script — so no guest-side `print` stub
+// can intercept it. Hiding the viewer's chrome removes the only trigger this
+// surface exposes.
+describe('pdfViewerSrc', () => {
+  it('hides the PDF viewer chrome that carries the Print button', () => {
+    expect(pdfViewerSrc('blob:hermes/abc')).toBe('blob:hermes/abc#toolbar=0')
+  })
+
+  it('leaves the blob URL itself untouched so revocation still matches', () => {
+    // The fragment is a viewer parameter, not part of the URL's identity:
+    // revokeObjectURL must be called with the bare blob URL or the document
+    // leaks for the life of the renderer.
+    expect(pdfViewerSrc('blob:hermes/abc').startsWith('blob:hermes/abc')).toBe(true)
   })
 })
