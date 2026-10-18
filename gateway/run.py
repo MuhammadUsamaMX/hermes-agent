@@ -431,7 +431,16 @@ def _ensure_windows_gateway_venv_imports() -> None:
 
     # A PM install's store Python was already activated onto the committed generation by
     # hermes_bootstrap; overlaying the leftover pre-PM venv loads a foreign ABI (#122183).
-    if committed_venv(project_root) is not None:
+    try:
+        committed = committed_venv(project_root)
+    except Exception as exc:
+        # An unreadable record -- a corrupt facts.json, an invalid record, or a generation
+        # that is missing / outside this install -- is not a reason to refuse to boot.
+        # Degrade into the legacy overlay, which stays ABI-guarded (#139085); the cron
+        # worker env reads the same record and degrades the same way.
+        logger.warning("gateway: could not read the committed dependency environment: %s", exc)
+        committed = None
+    if committed is not None:
         return
     candidates = [Path(v) for v in (os.environ.get("VIRTUAL_ENV"),) if v] + [project_root / "venv"]
 
