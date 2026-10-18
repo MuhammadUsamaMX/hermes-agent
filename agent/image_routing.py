@@ -16,6 +16,7 @@ import logging
 import mimetypes
 import os
 import re
+import tempfile
 from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_MODES = frozenset({"auto", "native", "text"})
+
+# Anthropic enforces an 8000 px per-side cap independently of its byte cap, so the
+# proactive attachment cap has to hold both axes (#124833).
+_MAX_ATTACHMENT_DIMENSION = 8000
+
+
+def _wire_image_budget_bytes() -> int:
+    """The reactive shrink pass's per-image byte budget, so both halves agree on one ceiling."""
+    from agent.conversation_compression import _IMAGE_SHRINK_TARGET_BYTES
+
+    return _IMAGE_SHRINK_TARGET_BYTES
 
 
 # Extensions extract_image_refs() auto-attaches. Documents/archives are excluded:
@@ -516,6 +528,63 @@ def _file_to_data_url(path: Path) -> Optional[str]:
         logger.info("image_routing: transcoded %s (%s) -> image/png for provider compatibility", path.name, mime)
         raw, mime = transcoded, "image/png"
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def cap_image_file_for_attachment(path: Path, *, max_bytes: Optional[int] = None) -> Path:
+    """``path`` re-encoded under the wire budget, or ``path`` itself when it already fits.
+
+    ``_file_to_data_url`` encodes at native size because the agent retry loop shrinks on
+    rejection — but that pass is gated on a *recognisable* ``image_too_large`` verdict, so
+    a provider that enforces its cap by dropping the connection re-sends the same oversized
+    payload forever (#124833). This is the proactive half, for callers that know an
+    attachment is a reference rather than user content (a Kanban card body): downscale
+    before the wire instead of waiting for a rejection that may never be legible.
+
+    Both axes are enforced, because a pixel downscale can re-encode to MORE bytes (PNG is
+    non-monotonic) while a byte-only accept gate would hand back an unusable blob. A file
+    that cannot be brought under budget is returned unchanged so the reactive pass still
+    owns it, and the original on disk is never mutated.
+    """
+    budget = max_bytes if max_bytes is not None else _wire_image_budget_bytes()
+    try:
+        stat_bytes = path.stat().st_size
+    except OSError:
+        return path
+    # base64 ~4/3 plus the data-URL header; skip the read entirely when it cannot fit.
+    if (stat_bytes * 4) // 3 + 100 <= budget and stat_bytes > 0:
+        return path
+    try:
+        from agent.conversation_compression import _IMAGE_SUFFIX_BY_MIME, _data_url_mime
+        from tools.vision_tools import _resize_image_for_vision
+
+        resized = _resize_image_for_vision(
+            path, max_base64_bytes=budget, max_dimension=_MAX_ATTACHMENT_DIMENSION,
+        )
+        if not resized or not isinstance(resized, str) or not resized.startswith("data:"):
+            logger.warning("image_routing: could not cap oversized %s for attachment", path.name)
+            return path
+        # The accept gate must use the axis that triggered the shrink (see _shrink_data_url).
+        from agent.conversation_compression import _decode_pixels
+
+        dims = _decode_pixels(resized)
+        if len(resized) > budget or (dims is not None and max(dims) > _MAX_ATTACHMENT_DIMENSION):
+            logger.warning(
+                "image_routing: %s stayed over budget after capping (bytes=%d dims=%s); "
+                "leaving it to the reactive shrink pass.", path.name, len(resized), dims,
+            )
+            return path
+        mime = _data_url_mime(resized.split(",", 1)[0])
+        suffix = _IMAGE_SUFFIX_BY_MIME.get(mime, ".jpg")
+        out = Path(tempfile.mkstemp(prefix="hermes_capped_", suffix=suffix)[1])
+        out.write_bytes(base64.b64decode(resized.split(",", 1)[1]))
+        logger.info(
+            "image_routing: capped %s (%.1f MB) to %s (%.1f MB encoded) before attaching",
+            path.name, stat_bytes / 1048576, out.name, len(resized) / 1048576,
+        )
+        return out
+    except Exception as exc:  # noqa: BLE001 — capping is best-effort; never block attachment
+        logger.warning("image_routing: failed to cap oversized %s (%s); attaching natively", path, exc)
+        return path
 
 
 def build_native_content_parts(

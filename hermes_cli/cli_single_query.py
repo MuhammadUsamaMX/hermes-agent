@@ -334,7 +334,16 @@ def _route_single_query_images(cli, query, effective_query, single_query_images,
 
 
 def _collect_kanban_task_images(single_query_images):
-    """Kanban workers: image paths/URLs in the task body join the first turn's attachments."""
+    """Kanban workers: image paths/URLs in the task body join the first turn's attachments.
+
+    Body images are capped before they are attached (#124833): a card body image is a
+    reference for the worker, not user content anyone needs at print resolution, and the
+    reactive shrink pass only fires on a *recognisable* ``image_too_large`` rejection — a
+    provider that enforces its cap by dropping the connection never produces one, so an
+    uncapped body image respawns its own worker forever under a "rate-limited" booking.
+    Images the user passed with ``--image`` are left at native size; only body-derived
+    paths are capped.
+    """
     single_query_image_urls: list[str] = []
     _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not _kanban_task_id:
@@ -342,6 +351,7 @@ def _collect_kanban_task_images(single_query_images):
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
+        from agent.image_routing import cap_image_file_for_attachment as _cap
         from agent.image_routing import extract_image_refs as _extract_refs
 
         with _kbc.connect_closing() as _conn:
@@ -354,7 +364,7 @@ def _collect_kanban_task_images(single_query_images):
             for _p in _kb_paths:
                 if _p not in _seen:
                     _seen.add(_p)
-                    single_query_images.append(Path(_p))
+                    single_query_images.append(_cap(Path(_p)))
             single_query_image_urls.extend(_kb_urls)
     except Exception as _exc:
         # Best-effort enrichment; never block worker startup on it.
