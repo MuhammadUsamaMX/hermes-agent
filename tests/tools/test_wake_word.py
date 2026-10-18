@@ -451,6 +451,130 @@ def test_bundled_hey_hermes_model_ships_on_disk():
 
 
 
+# ── sherpa KWS tokenization (tokens_type resolution) ──────────────────────
+
+
+def _fake_sherpa(captured):
+    """Stub ``sherpa_onnx`` whose ``text2token`` mirrors the REAL upstream precondition
+    (``if "bpe" in tokens_type: assert Path(bpe_model).is_file()``, sherpa_onnx/utils.py) so a
+    missing ``bpe.model`` fails here exactly as it does in production."""
+    mod = types.ModuleType("sherpa_onnx")
+
+    def text2token(texts, tokens, tokens_type="cjkchar", bpe_model=None, lexicon=None, output_ids=False):
+        if "bpe" in tokens_type:
+            assert Path(bpe_model).is_file(), f"File not exists, {bpe_model}"
+        captured["text2token"] = {
+            "texts": list(texts), "tokens": tokens,
+            "tokens_type": tokens_type, "bpe_model": bpe_model,
+        }
+        return [[t.upper() or "tok"] for t in texts]
+
+    class _Spotter:
+        def __init__(self, **kw):
+            captured["spotter"] = kw
+
+        def create_stream(self):
+            return object()
+
+    mod.text2token = text2token
+    mod.KeywordSpotter = _Spotter
+    return mod
+
+
+def _sherpa_model_dir(tmp_path, *, bpe: bool) -> Path:
+    """A KWS model dir. ``bpe=False`` mimics the Chinese wenetspeech model: a pinyin-syllable
+    tokens.txt with NO ``bpe.model`` alongside it."""
+    d = tmp_path / "kws-model"
+    d.mkdir()
+    (d / "tokens.txt").write_text("<blk> 0\n<sos/eos> 1\n<unk> 2\n", encoding="utf-8")
+    if bpe:
+        (d / "bpe.model").write_bytes(b"fake-bpe")
+    for part in ("encoder", "decoder", "joiner"):
+        (d / f"{part}-0.onnx").write_bytes(b"fake-onnx")
+    return d
+
+
+def _build_sherpa(cfg_sherpa, *, phrase="hey hermes", capture="client"):
+    cfg = {"provider": "sherpa", "capture": capture, "phrase": phrase,
+           "profile_routing": False, "sherpa": cfg_sherpa}
+    return ww._SherpaKwsEngine(cfg)
+
+
+def test_sherpa_non_bpe_model_builds_without_bpe_model(monkeypatch, tmp_path):
+    """#110003: a non-BPE KWS model (Chinese wenetspeech) ships no ``bpe.model``. Hard-coding
+    tokens_type="bpe" made text2token assert and the engine never built — the wake word was dead,
+    not merely deaf. No bpe.model must mean no bpe tokenization."""
+    captured = {}
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", _fake_sherpa(captured))
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    d = _sherpa_model_dir(tmp_path, bpe=False)
+
+    eng = _build_sherpa({"model_dir": str(d)}, phrase="你好赫尔墨斯")
+
+    assert captured["text2token"]["tokens_type"] == "ppinyin"
+    assert captured["text2token"]["bpe_model"] is None
+    eng.close()
+
+
+def test_sherpa_bpe_model_still_defaults_to_bpe(monkeypatch, tmp_path):
+    """Regression guard for the historical default: a model WITH bpe.model keeps tokens_type
+    "bpe" and gets bpe_model passed. Auto-detection must not change English behaviour."""
+    captured = {}
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", _fake_sherpa(captured))
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    d = _sherpa_model_dir(tmp_path, bpe=True)
+
+    eng = _build_sherpa({"model_dir": str(d)})
+
+    assert captured["text2token"]["tokens_type"] == "bpe"
+    assert captured["text2token"]["bpe_model"] == str(d / "bpe.model")
+    eng.close()
+
+
+def test_sherpa_explicit_tokens_type_config_wins(monkeypatch, tmp_path):
+    """``wake_word.sherpa.tokens_type`` was documented-looking but read by nothing. An explicit
+    setting overrides auto-detection, case/whitespace insensitively."""
+    captured = {}
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", _fake_sherpa(captured))
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    d = _sherpa_model_dir(tmp_path, bpe=False)
+
+    eng = _build_sherpa({"model_dir": str(d), "tokens_type": " PPinyin "},
+                        phrase="你好赫尔墨斯")
+
+    assert captured["text2token"]["tokens_type"] == "ppinyin"
+    eng.close()
+
+
+def test_sherpa_bpe_tokens_type_on_bpe_model_passes_bpe_model(monkeypatch, tmp_path):
+    """``cjkchar+bpe`` contains the substring "bpe", so upstream asserts bpe_model must exist
+    for it too. bpe_model is passed for both bpe-backed modes, and omitted otherwise."""
+    captured = {}
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", _fake_sherpa(captured))
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    d = _sherpa_model_dir(tmp_path, bpe=True)
+
+    eng = _build_sherpa({"model_dir": str(d), "tokens_type": "cjkchar+bpe"})
+
+    assert captured["text2token"]["tokens_type"] == "cjkchar+bpe"
+    assert captured["text2token"]["bpe_model"] == str(d / "bpe.model")
+    eng.close()
+
+
+def test_sherpa_rejects_unsupported_tokens_type(monkeypatch, tmp_path):
+    """A typo'd tokens_type must fail with an actionable error naming the bad value, not
+    silently degrade or blow up inside sherpa with an opaque assertion."""
+    captured = {}
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", _fake_sherpa(captured))
+    monkeypatch.setattr(pm, "ensure_import", lambda *a, **k: None)
+    d = _sherpa_model_dir(tmp_path, bpe=True)
+
+    with pytest.raises(ValueError) as exc:
+        _build_sherpa({"model_dir": str(d), "tokens_type": "bpee"})
+
+    assert "bpee" in str(exc.value)
+
+
 # ── Detector loop ────────────────────────────────────────────────────────
 
 

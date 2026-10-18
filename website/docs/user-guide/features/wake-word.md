@@ -156,6 +156,9 @@ wake_word:
   start_new_session: true     # start a fresh session on wake vs. continue the current one
   openwakeword:
     model: hey_hermes         # bundled default, or an absolute path to a custom .tflite
+  sherpa:
+    model_dir: null           # custom KWS model directory; omit to use the bundled English model
+    tokens_type: null         # "bpe" | "cjkchar" | "cjkchar+bpe" | "fpinyin" | "ppinyin" — auto-detected when unset
   porcupine:
     keyword: jarvis           # built-in keyword OR path to a custom .ppn
 ```
@@ -163,6 +166,15 @@ wake_word:
 `sensitivity` and `start_new_session` apply to all three engines. For sherpa,
 `phrase` selects the detection phrase. For openWakeWord and Porcupine, `phrase`
 is a display label; their model or keyword selects the detection phrase.
+
+For sherpa, `model_dir` points at an unpacked open-vocabulary KWS model
+(`tokens.txt` plus the encoder/decoder/joiner ONNX files). `tokens_type` is how
+that model's vocabulary is tokenized, and it is normally left unset: Hermes
+picks `bpe` when the model ships a `bpe.model` (the bundled English GigaSpeech
+model does) and `ppinyin` when it does not (Chinese models such as
+`sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01` use a pinyin-syllable
+`tokens.txt`). Set it explicitly only if auto-detection picks the wrong mode —
+an unsupported value is rejected with the list of accepted ones.
 
 `input_device` is passed directly to the wake listener's PortAudio
 (`sounddevice`) stream. Use either a numeric device index or an unambiguous

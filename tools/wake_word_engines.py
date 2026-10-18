@@ -148,6 +148,10 @@ _SHERPA_KWS_MODEL_URL = (
 )
 _SHERPA_KWS_MODEL_DIR = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 
+#: Tokenization modes sherpa's text2token accepts for this call site (see sherpa_onnx/utils.py).
+#: "phone+ppinyin" is excluded: it needs a lexicon.txt we have no config path for.
+_SHERPA_TOKENS_TYPES = ("bpe", "cjkchar", "cjkchar+bpe", "fpinyin", "ppinyin")
+
 
 def _sherpa_model_root() -> Path:
     from hermes_constants import get_hermes_home
@@ -198,8 +202,27 @@ class _SherpaKwsEngine(_Engine):
             for prof, p in ww.enrolled_profile_phrases().items():
                 phrase_map.setdefault(p.strip(), prof)
         phrases = list(phrase_map)
-        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"), tokens_type="bpe",
-                            bpe_model=str(d / "bpe.model"))
+        # Tokenization mode is a property of the MODEL's vocabulary, not a constant. sherpa's
+        # text2token asserts `if "bpe" in tokens_type: assert Path(bpe_model).is_file()`, so
+        # hard-coding "bpe" made every non-BPE KWS model (e.g. the Chinese wenetspeech model,
+        # whose tokens.txt is a pinyin-syllable table and which ships no bpe.model) raise
+        # AssertionError and the engine never build. Resolve it instead: an explicit
+        # `wake_word.sherpa.tokens_type` wins, else auto — bpe.model present means BPE
+        # (the historical English default), absent means a pinyin-syllable CJK vocabulary.
+        tokens_type = str(sub.get("tokens_type") or "").strip().lower()
+        if not tokens_type:
+            tokens_type = "bpe" if (d / "bpe.model").exists() else "ppinyin"
+        if tokens_type not in _SHERPA_TOKENS_TYPES:
+            # "phone+ppinyin" is a real sherpa mode but needs a lexicon.txt this call site has
+            # no path for, so it is rejected here rather than failing opaquely inside sherpa.
+            raise ValueError(
+                f"Unsupported sherpa tokens_type: {tokens_type!r}. "
+                f"Expected one of: {', '.join(_SHERPA_TOKENS_TYPES)}."
+            )
+        # bpe_model is only valid for bpe-backed modes, and only those assert its presence.
+        bpe_model = str(d / "bpe.model") if "bpe" in tokens_type else None
+        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"),
+                            tokens_type=tokens_type, bpe_model=bpe_model)
         # sherpa keyword entries reject spaces in the @display-name; underscore them and
         # map display → profile for match routing.
         self._display_to_profile: dict[str, str] = {}
