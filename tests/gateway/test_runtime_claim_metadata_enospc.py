@@ -42,6 +42,14 @@ class _FlushRaisesEnospc:
         raise OSError(errno.ENOSPC, "No space left on device")
 
 
+def _enospc_fdopen(monkeypatch, module) -> None:
+    """Make ``module``'s ``os.fdopen`` yield handles whose ``flush()`` reports a full disk."""
+    monkeypatch.setattr(
+        module.os, "fdopen",
+        lambda fd, *a, **k: _FlushRaisesEnospc(_REAL_FDOPEN(fd, *a, **k)),
+    )
+
+
 def _enospc(*_args, **_kwargs):
     raise OSError(errno.ENOSPC, "No space left on device")
 
@@ -78,7 +86,7 @@ def test_reserve_keeps_claim_when_lock_metadata_write_hits_enospc(home, monkeypa
 
 def test_reserve_keeps_claim_when_lock_record_flush_hits_enospc(home, monkeypatch):
     """The reported failure was at ``flush()``, after the bytes were buffered."""
-    monkeypatch.setattr(runtime_ownership.os, "fdopen", lambda fd, *a, **k: _FlushRaisesEnospc(_REAL_FDOPEN(fd, *a, **k)))
+    _enospc_fdopen(monkeypatch, runtime_ownership)
 
     runtime_ownership.process_ownership.reserve([home])
 
@@ -117,7 +125,7 @@ def test_reserve_still_refuses_a_lock_already_held_elsewhere(home, monkeypatch):
 
 def test_write_pid_file_survives_enospc_on_close_flush(home, monkeypatch):
     """``_write_json_excl`` writes through ``os.fdopen``; the close-time flush can raise ENOSPC."""
-    monkeypatch.setattr(status.os, "fdopen", lambda fd, *a, **k: _FlushRaisesEnospc(_REAL_FDOPEN(fd, *a, **k)))
+    _enospc_fdopen(monkeypatch, status)
 
     status.write_pid_file()  # must not raise: startup continues in a degraded state
 
@@ -167,7 +175,7 @@ def test_claim_pid_file_startup_completes_under_enospc(home, monkeypatch):
     This is the regression the issue reported: ENOSPC escaped the claim and exited 1, which a
     ``Restart=always`` supervisor turned into an unbounded restart loop.
     """
-    import gateway.run_bootstrap as run_bootstrap
+    from gateway import run_bootstrap
 
     monkeypatch.setattr(status.json, "dump", _enospc)
     monkeypatch.setattr(runtime_ownership.json, "dump", _enospc)
@@ -178,7 +186,7 @@ def test_claim_pid_file_startup_completes_under_enospc(home, monkeypatch):
 
 def test_startup_still_loses_to_a_real_running_gateway(home, monkeypatch):
     """Degrading on ENOSPC must not degrade a genuine conflict into a false success."""
-    import gateway.run_bootstrap as run_bootstrap
+    from gateway import run_bootstrap
 
     rival = runtime_ownership.ProfileOwnership()
     try:
