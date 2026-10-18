@@ -600,20 +600,51 @@ def capture_retired_wal_generation(
     return final
 
 
+def _lossy_text(value: Any) -> Any:
+    """``bytes`` -> ``str`` with U+FFFD for undecodable sequences; anything else passes through.
+
+    Installed as every state.db connection's ``text_factory`` (see
+    :func:`_connect_tracked_db`). pysqlite decodes TEXT cells with this callable, defaulting to
+    strict UTF-8: one stored value holding a truncated multi-byte sequence (e.g. a prompt ending
+    in the first two bytes of a 3-byte ``✓`` -- ``e2 9c``, as left by a process killed
+    mid-write) aborted the ENTIRE ``fetchall`` with "Could not decode to UTF-8 column". Since
+    every session-read query materialises ``COALESCE(sp.prompt, s.system_prompt) AS
+    _system_prompt_resolved``, a single corrupt ``system_prompts`` row made every session
+    list/load fail and took down the desktop session panel (#109450). Decoding lossily makes one
+    bad row degrade to replacement characters instead of failing the query.
+
+    Mirrors ``hermes_cli.kanban_db._lossy_text`` (the same defect class on the board DB, #111743);
+    kept local so state.db does not import the CLI package.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _connect_tracked_db(path, tracking_path=None, **kwargs):
     """``sqlite3.connect`` that registers the open fd so byte-level probes of a live file are
     refused (an ``open()``/``close()`` would cancel every POSIX lock, even a running VACUUM's
     EXCLUSIVE).  The ONLY tolerated fallback is the helper being absent (scaffold/embed installs
     without hermes_cli); a real connection failure must propagate — a silent untracked retry
-    would disable the guard for that connection."""
+    would disable the guard for that connection.
+
+    Every connection gets the lossy ``text_factory`` so one undecodable TEXT cell cannot abort a
+    whole query (#109450).  Set here, at the single choke point every state.db connection passes
+    through, rather than per call site — the read pool, the writer and ad-hoc probes all inherit
+    it.
+    """
     try:
         from hermes_cli.sqlite_safe_read import connect_tracked
     except ImportError:
         logger.debug("hermes_cli.sqlite_safe_read unavailable; opening %s untracked "
                      "(byte-probe guard inactive in this install)", path)
-        return sqlite3.connect(str(path), **kwargs)
+        conn = sqlite3.connect(str(path), **kwargs)
+        conn.text_factory = _lossy_text
+        return conn
     # Open through THIS module's sqlite3.connect so tests patching hermes_state.sqlite3.connect keep control.
-    return connect_tracked(path, tracking_path=tracking_path, connect_fn=sqlite3.connect, **kwargs)
+    conn = connect_tracked(path, tracking_path=tracking_path, connect_fn=sqlite3.connect, **kwargs)
+    conn.text_factory = _lossy_text
+    return conn
 
 
 def _preopen_header(path: Path, probe_bytes: int, force: bool) -> Optional[bytes]:
