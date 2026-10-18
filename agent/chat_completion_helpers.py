@@ -2302,8 +2302,20 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
         # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
         final_response = _EMPTY_SUMMARY_RESPONSE
+        # A provider call that raises never became empty text, so it used to leave the loop on
+        # attempt 0 and spend the retry pass on nothing (#123436). Record it and let the same
+        # retry decide, the way a router shim or a malformed response already does (#68396).
+        last_summary_error: Exception | None = None
         for retry_count in (0, 1):
-            text = attempt(retry_count)
+            try:
+                text = attempt(retry_count)
+            except InterruptedError:
+                # Cancellation is not an unusable summary: requeue the turn, do not retry.
+                raise
+            except Exception as exc:
+                logger.warning("Iteration summary attempt %d failed: %s", retry_count + 1, exc, exc_info=True)
+                last_summary_error = exc
+                continue
             if not text:
                 continue
             if "<think>" in text:
@@ -2314,6 +2326,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 final_response = text
             break
 
+        if final_response is _EMPTY_SUMMARY_RESPONSE and last_summary_error is not None:
+            # The retry recovered a summary in no case, so this turn ends as it did before:
+            # surface the failure copy (which names the limit and the next step) rather than
+            # the bare "couldn't generate a summary" text the exhausted-empty path returns.
+            raise last_summary_error
+
     except InterruptedError:
         # Cancellation is not a summary failure: drop the unanswered nudge and let the
         # finalizer end the turn as interrupted so the pending message is requeued.
@@ -2322,7 +2340,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             messages.pop()
         raise
     except Exception as e:
-        logger.warning("Failed to get summary response: %s", e)
+        logger.warning("Failed to get summary response: %s", e, exc_info=True)
         from agent.turn_failure_copy import site_copy
         final_response = site_copy("max_iterations_no_summary", limit=agent.max_iterations)
     finally:
