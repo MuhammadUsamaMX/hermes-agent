@@ -17,6 +17,8 @@ Output (JSON):
 Use the isolated helper interpreter prepared by this skill's PM setup recipe.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import re

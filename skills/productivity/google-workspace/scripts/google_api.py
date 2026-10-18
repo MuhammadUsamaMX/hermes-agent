@@ -5,6 +5,10 @@ Uses the Google Workspace CLI (`gws`) when available, but preserves the
 existing Hermes-facing JSON contract and falls back to the Python client
 libraries if `gws` is not installed.
 
+Annotations below use PEP 604 unions (`str | None`), which raise TypeError at
+import time on Python 3.9. Deferring evaluation keeps this script importable
+under the system interpreter (e.g. macOS' /usr/bin/python3).
+
 Usage:
   python google_api.py gmail search "is:unread" [--max 10]
   python google_api.py gmail get MESSAGE_ID
@@ -20,6 +24,8 @@ Usage:
   python google_api.py docs get DOC_ID
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -27,7 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -524,7 +530,7 @@ def gmail_modify(args):
 
 
 def calendar_list(args):
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
 
