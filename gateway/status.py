@@ -21,6 +21,7 @@ from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 from hermes_dir_acl import make_user_dir
+from hermes_state_errors import is_disk_full_error
 
 from gateway.status_inline_source import (
     command_line_runs_inline_source,
@@ -1064,14 +1065,26 @@ def write_pid_file() -> None:
 
 
 def _write_json_excl(path: Path, record: dict[str, Any]) -> None:
-    """Create ``path`` with O_CREAT|O_EXCL and dump ``record``; unlinks on a failed write."""
+    """Create ``path`` with O_CREAT|O_EXCL and dump ``record``; unlinks on a failed write.
+
+    ENOSPC is the one exception that keeps the ``O_EXCL`` inode and returns: that creation *is* the
+    mutual-exclusion claim, and strict readers already fail closed on the empty/torn record a failed
+    write leaves behind (``_read_json_file``). Unlinking and propagating instead made a full disk kill
+    a gateway that could run degraded — exit 1 under ``Restart=always`` became an unbounded restart
+    loop (#122720). Every other error still unlinks and raises.
+    """
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle)
-    except Exception:
-        _unlink_quietly(path)
-        raise
+    except Exception as exc:
+        if not is_disk_full_error(exc):
+            _unlink_quietly(path)
+            raise
+        logger.warning(
+            "Created %s but its PID metadata could not be written because the disk is full; "
+            "continuing without it.", path, exc_info=exc,
+        )
 
 
 def _apply_set_fields(target: dict[str, Any], fields) -> None:
