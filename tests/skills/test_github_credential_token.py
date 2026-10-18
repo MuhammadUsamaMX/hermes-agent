@@ -1,6 +1,7 @@
 """Regression tests for scanner-safe GitHub credential extraction (#22722)."""
 
 import importlib.util
+import inspect
 from pathlib import Path
 import subprocess
 import sys
@@ -86,31 +87,31 @@ def test_rejects_ambiguous_lookalike_or_malformed_credentials(tmp_path, credenti
 
 
 def test_helper_defers_annotation_evaluation_so_it_imports_on_python_39():
-    """PEP 604 unions must not be evaluated at import time.
+    """No annotation in the helper may be evaluated at import time.
 
-    The helper is documented as a standalone ``python3 <path>`` invocation, so it
-    has to import on interpreters older than the ``requires-python`` floor the
-    package itself declares. Without ``from __future__ import annotations`` the
-    ``str | None`` annotation on ``_decode`` is evaluated eagerly and Python 3.9
-    raises ``TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'``
-    at import.
+    The helper is a standalone ``python3 <path>`` script, so it must import on
+    interpreters older than the ``requires-python`` floor the package declares.
+    Without postponed evaluation a PEP 604 union such as ``str | None`` is
+    evaluated eagerly and Python 3.9 raises ``TypeError: unsupported operand
+    type(s) for |: 'type' and 'NoneType'`` before ``main`` ever runs.
 
-    Asserting the annotations are *strings* pins the actual mechanism, so the
-    test bites on every interpreter (including CI's own) rather than only on a
-    real 3.9 runtime. See #125202.
+    Asserting the annotations stay *strings* pins the mechanism, so the check
+    bites on every interpreter CI runs rather than only on a real 3.9. Scans the
+    whole module so a union added to any function is caught. See #125202.
     """
     spec = importlib.util.spec_from_file_location("git_credential_token", HELPER)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    annotations = module._decode.__annotations__
-
-    assert annotations, "expected _decode to carry annotations"
-    non_postponed = {
-        name: value for name, value in annotations.items() if not isinstance(value, str)
+    eager = {
+        (name, param): value
+        for name, obj in vars(module).items()
+        if inspect.isfunction(obj)
+        for param, value in getattr(obj, "__annotations__", {}).items()
+        if not isinstance(value, str)
     }
-    assert non_postponed == {}, (
+    assert eager == {}, (
         "helper annotations are evaluated at import time, so PEP 604 unions crash "
         "on Python 3.9; add 'from __future__ import annotations' (#125202)"
     )
