@@ -862,15 +862,14 @@ class BatchRunner:
 def _split_csv(value: Any) -> Optional[list[str]]:
     """Normalize a CLI comma-separated flag to a list of items; ``None`` when empty.
 
-    ``fire`` literal-evaluates every flag value, so the documented
-    ``--providers_allowed=anthropic,openai`` already arrives as a tuple while a value
-    containing a space (``anthropic, ,openai``) stays a string. Both forms are
-    accepted, and blank items are dropped rather than passed on as a provider named "".
+    ``fire`` literal-evaluates flag values, so ``--providers_allowed=anthropic,openai``
+    arrives as a tuple while a value containing a space (``anthropic, ,openai``) stays a
+    string. Both are accepted; blanks are dropped rather than passed on as a provider "".
     """
     if not value:
         return None
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
-    return [s for s in (str(p).strip() for p in items) if s] or None
+    return [p for p in (str(i).strip() for i in items) if p] or None
 
 
 def main(
