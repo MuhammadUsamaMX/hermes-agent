@@ -1128,6 +1128,12 @@ class OpenAICompatRoutesMixin:
                     # opencode and the Vercel AI SDK render as a thinking block.
                     await response.write(_sse_frame(_chunk({"reasoning_content": delta[1]})))
                 elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__status__":
+                    # Named frame too, and it arrives exactly when the provider is retrying or
+                    # recovering, so a strict OpenAI client would crash on it there. Same opt-out
+                    # as tool progress (#124328). approval.request below deliberately stays: it is
+                    # an interactive control frame, and hiding it would stall the turn.
+                    if not self._tool_progress_events:
+                        continue
                     await response.write(_sse_frame(delta[1], event="hermes.status"))
                 elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__approval__":
                     await response.write(_sse_frame(delta[1], event="approval.request"))
