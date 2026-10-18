@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   calendarBucket,
   DAY,
+  EPOCH_MAX_SECONDS,
+  EPOCH_MIN_SECONDS,
   fmtMonth,
   fmtMonthYear,
   formatAgo,
@@ -10,7 +12,8 @@ import {
   MINUTE,
   nominalDayStart,
   SECOND,
-  sessionBucketLabel
+  sessionBucketLabel,
+  trustedEpochSeconds
 } from './time'
 
 const labels = {
@@ -23,6 +26,54 @@ const labels = {
 
 const now = 1_000 * DAY
 const ago = (delta: number) => formatAgo(now - delta, labels, now)
+
+// #91536: a salvage pass over a damaged state.db can leave a session's recency
+// column holding a garbage double (5.49e+246) salvaged from a torn page. The
+// backend bounds those cells on read (coerce_epoch, EPOCH_MIN..EPOCH_MAX), but
+// the row and the date-grouping read the columns directly, and `new Date(garbage
+// * 1000)` is an Invalid Date whose `.toISOString()` throws RangeError: Invalid
+// time value — which took the whole Sessions pane down instead of degrading one
+// row to an unknown age. These bounds mirror hermes_cli/timefmt.py's
+// EPOCH_MIN/EPOCH_MAX so the two halves of the fix agree on what "trustworthy".
+describe('trustedEpochSeconds', () => {
+  it('passes a real timestamp through untouched', () => {
+    expect(trustedEpochSeconds(1_780_000_000)).toBe(1_780_000_000)
+  })
+
+  it('rejects garbage doubles, non-finite values and TEXT cells', () => {
+    expect(trustedEpochSeconds(5.49e246)).toBeNull()
+    expect(trustedEpochSeconds(Number.NaN)).toBeNull()
+    expect(trustedEpochSeconds(Number.POSITIVE_INFINITY)).toBeNull()
+    expect(trustedEpochSeconds(Number.NEGATIVE_INFINITY)).toBeNull()
+    expect(trustedEpochSeconds('not-a-timestamp' as never)).toBeNull()
+  })
+
+  it('treats null, undefined and missing as unset rather than corrupt', () => {
+    expect(trustedEpochSeconds(null)).toBeNull()
+    expect(trustedEpochSeconds(undefined)).toBeNull()
+    expect(trustedEpochSeconds()).toBeNull()
+  })
+
+  it('falls back to the next candidate when the first is untrustworthy', () => {
+    expect(trustedEpochSeconds(5.49e246, 1_780_000_000)).toBe(1_780_000_000)
+    expect(trustedEpochSeconds(null, 1_780_000_000)).toBe(1_780_000_000)
+  })
+
+  it('skips falsy candidates so an unset column still falls through', () => {
+    // `0` is "unset" here, not a real 1970 timestamp: the row-level `x || y`
+    // this replaces fell through on 0, and `session-date-groups.test.ts` pins
+    // that (a `last_active: 0` session must still bucket off `started_at`).
+    expect(trustedEpochSeconds(0)).toBeNull()
+    expect(trustedEpochSeconds(0, 1_780_000_000)).toBe(1_780_000_000)
+  })
+
+  it('accepts only the backend coerce_epoch window', () => {
+    expect(trustedEpochSeconds(EPOCH_MIN_SECONDS + 1)).toBe(EPOCH_MIN_SECONDS + 1)
+    expect(trustedEpochSeconds(EPOCH_MAX_SECONDS)).toBe(EPOCH_MAX_SECONDS)
+    expect(trustedEpochSeconds(EPOCH_MAX_SECONDS + 1)).toBeNull()
+    expect(trustedEpochSeconds(EPOCH_MIN_SECONDS - 1)).toBeNull()
+  })
+})
 
 describe('formatAgo', () => {
   it('reads "now" under two seconds, then seconds', () => {

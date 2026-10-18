@@ -33,6 +33,45 @@ export const fmtDate = new Intl.DateTimeFormat(undefined, { day: 'numeric', mont
 export const fmtMonth = new Intl.DateTimeFormat(undefined, { month: 'long' })
 export const fmtMonthYear = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' })
 
+// ── Trustworthy epoch seconds ──────────────────────────────────────────────
+// Epoch-seconds window a stored timestamp must fall in to be trusted: 1970 .. ~2103.
+// These mirror `EPOCH_MIN`/`EPOCH_MAX` in `hermes_cli/timefmt.py` (`coerce_epoch`) so the
+// desktop and the backend agree on what "trustworthy" means. SQLite's dynamic typing lets a
+// TEXT cell, `inf`/`nan`, or a garbage double salvaged from a damaged page (`5.49e+246`) sit in
+// a REAL column; `new Date(garbage * 1000)` is then an Invalid Date whose `.toISOString()`
+// throws `RangeError: Invalid time value`, which took the whole Sessions pane down rather than
+// degrading one row to an unknown age (#91536).
+export const EPOCH_MIN_SECONDS = 0
+export const EPOCH_MAX_SECONDS = 4_200_000_000
+
+/**
+ * The first candidate that is a trustworthy Unix-seconds timestamp, else `null`.
+ *
+ * Takes its candidates in preference order — `trustedEpochSeconds(session.last_active,
+ * session.started_at)` — so an unset or corrupt `last_active` falls through to `started_at`
+ * instead of blanking the row. A falsy candidate (`0`, `NaN`, `null`, `undefined`) is
+ * "unset" and skipped, exactly as the `x || y` idiom this replaces treated it; a TRUTHY
+ * but out-of-window candidate is "corrupt" and is likewise skipped, which is the gap that
+ * let a salvaged double through: it is truthy and finite, so it sailed straight into
+ * `new Date(...)` (#91536).
+ */
+export function trustedEpochSeconds(...candidates: readonly unknown[]): number | null {
+  for (const candidate of candidates) {
+    // Falsy first: matches `||`, so 0/unset keeps falling through to the next candidate
+    // rather than being accepted as a real (1970) timestamp.
+    if (!candidate || typeof candidate !== 'number') {
+      continue
+    }
+
+    // Also false for NaN, which the window comparison below would otherwise miss.
+    if (Number.isFinite(candidate) && candidate >= EPOCH_MIN_SECONDS && candidate <= EPOCH_MAX_SECONDS) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
 // ── Relative time ──────────────────────────────────────────────────────────
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto', style: 'short' })
 

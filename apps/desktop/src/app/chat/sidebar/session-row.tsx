@@ -23,7 +23,7 @@ import { displayModelName } from '@/lib/model-status-label'
 import { sessionProjectLabel } from '@/lib/session-project-label'
 import { SESSION_ROW_AREAS } from '@/lib/session-row-slots'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
-import { coarseElapsed } from '@/lib/time'
+import { coarseElapsed, SECOND, trustedEpochSeconds } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { $sidebarRowMeta } from '@/store/layout'
@@ -159,10 +159,16 @@ function SidebarSessionRowImpl({
     toolCallCount: fmt.toolCallCount
   })
 
-  const timestamp = session.last_active || session.started_at
-  const age = formatAge(timestamp, r)
-  const timestampDate = new Date(timestamp * 1000)
-  const absoluteAge = formatMessageTimestamp(timestampDate, t.assistant.thread)
+  // A corrupt recency cell must never reach `new Date(...)`: a salvage pass over a
+  // damaged state.db can leave `5.49e+246` in a REAL column, and `toISOString()` on
+  // the resulting Invalid Date throws RangeError: Invalid time value — which took the
+  // whole Sessions pane down rather than degrading one row to an unknown age (#91536).
+  // `trustedEpochSeconds` skips it (and any other out-of-window cell) and falls
+  // through to `started_at`; a row with no trustworthy cell at all simply shows no age.
+  const timestamp = trustedEpochSeconds(session.last_active, session.started_at)
+  const age = timestamp === null ? null : formatAge(timestamp, r)
+  const timestampDate = timestamp === null ? null : new Date(timestamp * SECOND)
+  const absoluteAge = timestampDate === null ? '' : formatMessageTimestamp(timestampDate, t.assistant.thread)
   const handleLabel = `Reorder ${title}`
   // Opt-in row metadata from the sidebar's filter menu. Read from the store
   // rather than threaded as props: the subscription re-renders past the memo
@@ -213,7 +219,9 @@ function SidebarSessionRowImpl({
     trailing.push({ key: 'pr', node: <PrTag pr={pr} /> })
   }
 
-  const showAge = pinnedAge || card
+  // A row with no trustworthy recency has no `<time>` to render, so it falls back
+  // to the figures-only tail rather than crashing on `toISOString()` (#91536).
+  const showAge = (pinnedAge || card) && timestampDate !== null && age !== null
 
   if (figures.length || showAge) {
     // The card's meta lines separate by spacing alone, so its header figures

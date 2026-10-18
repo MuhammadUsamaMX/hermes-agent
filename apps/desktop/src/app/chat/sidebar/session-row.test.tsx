@@ -461,3 +461,35 @@ describe('SidebarSessionRow continuation badge', () => {
     expect(continuationGlyph(branch.container)).toBeNull()
   })
 })
+
+// #91536: a salvage pass could leave a session's recency columns as garbage
+// doubles (e.g. 5.49e+246, salvaged from a damaged page). The backend bounds
+// those cells on read, but `last_active` / `started_at` still reach the row
+// unguarded, and `Date#toISOString()` on the resulting Invalid Date threw
+// RangeError: Invalid time value — which took the whole Sessions pane down
+// instead of degrading one row to an unknown age.
+describe('SidebarSessionRow untrustworthy recency columns (#91536)', () => {
+  it('renders a row whose recency columns are garbage doubles', () => {
+    expect(() =>
+      renderRow(makeSession({ last_active: 5.49e246, started_at: 5.49e246, title: 'Corrupt' }), { card: true })
+    ).not.toThrow()
+  })
+
+  it('renders a row with no usable recency at all', () => {
+    expect(() =>
+      renderRow(
+        makeSession({ last_active: null as never, started_at: undefined as never, title: 'Missing' }),
+        { card: true }
+      )
+    ).not.toThrow()
+  })
+
+  it('still dates a trustworthy timestamp instead of blanking it', () => {
+    const { container } = renderRow(
+      makeSession({ last_active: Date.now() / 1000 - 120, started_at: 0, title: 'Real' }),
+      { card: true }
+    )
+
+    expect(container.querySelector('time')?.getAttribute('datetime')).toBeTruthy()
+  })
+})

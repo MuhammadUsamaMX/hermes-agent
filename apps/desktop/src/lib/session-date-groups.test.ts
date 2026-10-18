@@ -6,6 +6,7 @@ import { makeSessionInfo } from '../test/session-info'
 
 import type { SidebarSessionEntry } from './session-branch-tree'
 import { groupEntriesByRecency, hideCollapsedGroupRows, toSessionRows } from './session-date-groups'
+import { calendarBucket, sessionBucketLabel } from './time'
 
 const session = (id: string, overrides: Partial<SessionInfo> = {}): SessionInfo =>
   makeSessionInfo({ id, message_count: 1, source: 'cli', title: id, ...overrides })
@@ -25,6 +26,83 @@ const group = (entries: SidebarSessionEntry[], nowMs = NOW) => groupEntriesByRec
 
 const dividerKeys = (rows: ReturnType<typeof groupEntriesByRecency>): string[] =>
   rows.flatMap(row => (row.kind === 'divider' ? [row.key] : []))
+
+// Fixed divider labels, so the "Intl never formats a NaN day" assertions below
+// exercise the real `sessionBucketLabel` → `Intl.DateTimeFormat` path rather
+// than a stand-in.
+const DIVIDER_LABELS = {
+  lastWeek: 'Last week',
+  thisMonth: 'Earlier this month',
+  thisWeek: 'Earlier this week',
+  today: 'Earlier today',
+  yesterday: 'Yesterday'
+}
+
+// #91536: the same garbage-double recency reaches the grouping pass, where
+// `calendarBucket` feeds an `Intl.DateTimeFormat` that throws RangeError: Invalid
+// time value on the resulting NaN day — taking down the pane for one bad row.
+describe('groupEntriesByRecency untrustworthy recency (#91536)', () => {
+  const GARBAGE = 5.49e246
+
+  it('groups a garbage-double row instead of throwing', () => {
+    const rows = group([
+      entry(session('real', { last_active: at(2026, 5, 18, 11) })),
+      entry(session('garbage', { last_active: GARBAGE, started_at: GARBAGE }))
+    ])
+
+    // The corrupt row survives the pass and gets its own labelled bucket
+    // (bucketed as oldest) instead of being dropped or crashing the grouping.
+    expect(rows.map(row => row.kind)).toEqual(expect.arrayContaining(['session', 'divider']))
+    expect(rows.some(row => row.kind === 'session' && row.entry.session.id === 'garbage')).toBe(true)
+  })
+
+  it('treats a row with no usable recency as oldest rather than crash', () => {
+    // `groupEntriesByRecency` buckets in the order it is given (the caller
+    // pre-sorts), so the assertion is that the row survives the pass and
+    // lands in a labelled group — not that it is moved.
+    const rows = group([
+      entry(session('real', { last_active: at(2026, 5, 18, 11) })),
+      entry(session('unset', { last_active: null as never, started_at: undefined as never }))
+    ])
+
+    expect(rows.some(row => row.kind === 'session' && row.entry.session.id === 'unset')).toBe(true)
+    expect(() => sessionBucketLabel(calendarBucket(0, NOW, MONDAY), DIVIDER_LABELS)).not.toThrow()
+  })
+
+  it('labels every divider it emits, so Intl never formats a NaN day', () => {
+    const rows = group([
+      entry(session('real', { last_active: at(2026, 5, 18, 11) })),
+      entry(session('garbage', { last_active: GARBAGE, started_at: GARBAGE }))
+    ])
+
+    for (const row of rows) {
+      if (row.kind === 'divider' && 'bucket' in row) {
+        expect(() => sessionBucketLabel(row.bucket, DIVIDER_LABELS)).not.toThrow()
+      }
+    }
+  })
+
+  // Only a TRUTHY out-of-window cell reaches `Intl`: NaN/null/undefined are
+  // falsy, so the old `|| 0` already covered them. A salvaged double like
+  // 5.49e+246 is truthy and finite, so it sailed through and produced a NaN
+  // day — that is the shape this fix actually closes.
+  it.each([
+    ['a positive garbage double', 5.49e246],
+    ['a negative garbage double', -5.49e246],
+    ['Infinity', Number.POSITIVE_INFINITY]
+  ])('survives %s', (_label, value) => {
+    const rows = group([
+      entry(session('real', { last_active: at(2026, 5, 18, 11) })),
+      entry(session('bad', { last_active: value, started_at: value }))
+    ])
+
+    for (const row of rows) {
+      if (row.kind === 'divider' && 'bucket' in row) {
+        expect(() => sessionBucketLabel(row.bucket, DIVIDER_LABELS)).not.toThrow()
+      }
+    }
+  })
+})
 
 describe('groupEntriesByRecency', () => {
   it('limits complete Updated groups without splitting bursts or branch clusters', () => {

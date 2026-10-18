@@ -1,5 +1,5 @@
 import { type SidebarSessionEntry } from '@/lib/session-branch-tree'
-import { calendarBucket, HOUR, localeWeekStartDay, MINUTE, SECOND, type SessionBucket } from '@/lib/time'
+import { calendarBucket, HOUR, localeWeekStartDay, MINUTE, SECOND, type SessionBucket, trustedEpochSeconds } from '@/lib/time'
 
 // A flat list row is either a divider or a session entry. Interleaving these
 // lets the flat list (and the virtualizer) render separators inline without a
@@ -12,8 +12,13 @@ export type SidebarListRow =
 
 // The row's own age label reads from `last_active || started_at`; bucket off the
 // same value so a divider lines up with what the row actually shows.
+//
+// A corrupt recency cell must fall to epoch 0, not pass through: the bucket's
+// day feeds `fmtMonth`/`fmtMonthYear`, and `Intl.DateTimeFormat.format(NaN)`
+// throws RangeError: Invalid time value, which took the pane down for one bad
+// row (#91536). An untrustworthy cell is sorted as oldest rather than dropped.
 const recencyMs = (entry: SidebarSessionEntry): number =>
-  (entry.session.last_active || entry.session.started_at || 0) * SECOND
+  (trustedEpochSeconds(entry.session.last_active, entry.session.started_at) ?? 0) * SECOND
 
 // Aim the head at "the most recent handful". A break shorter than
 // MIN_RUN_BREAK_MS never counts as one — that would slice a rapid-fire burst —
