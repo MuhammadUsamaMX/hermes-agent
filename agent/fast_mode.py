@@ -34,6 +34,52 @@ SERVICE_TIER_WORDS: dict[str, str] = {
 }
 # Typed /fast shorthands -> canonical /fast word (pickers always send the canonical value).
 FAST_ARG_ALIASES: dict[str, str] = {"ultra": "ultrafast"}
+# Fast-mode request_overrides are route-scoped, not provider-scoped: ``speed`` is an
+# Anthropic-only param and ``service_tier`` is only billed by the first-party priority
+# routes. Carrying either across a route change hands an unknown top-level kwarg to the
+# chat-completions SDK (``Completions.create() got an unexpected keyword argument 'speed'``,
+# #122010), so every route change re-runs the gate below.
+ROUTE_SCOPED_OVERRIDE_KEYS = ("speed", "service_tier")
+
+
+def rederive_for_route(agent: Any, provider: str | None = None) -> dict[str, Any]:
+    """Fast-mode overrides to re-pin after ``agent`` changed route, or ``{}``.
+
+    Re-runs the single fast-mode gate (``hermes_cli.models.resolve_fast_mode_overrides``) that
+    startup and ``/fast`` use, so a route the gate rejects gets no fast params at all and a route
+    it approves gets that route's own param (Anthropic ``speed``, or ``service_tier`` for
+    OpenAI/xAI). The agent's tier is passed through so ``ultrafast`` is re-derived as
+    ``ultrafast`` — never silently downgraded to ``priority``.
+
+    Only the static tiers (:data:`STATIC_TIERS`, pinned into ``agent.request_overrides`` at build
+    time) are re-pinned; the bounded ``auto``/``cold`` modes layer their override per request in
+    :func:`effective_request_overrides`, which gates on the same route. Callers must drop
+    :data:`ROUTE_SCOPED_OVERRIDE_KEYS` from the carried overrides before merging this, so a stale
+    param can never outlive its route."""
+    tier = getattr(agent, "service_tier", None)
+    if tier not in STATIC_TIERS:
+        return {}  # fast mode off, or bounded — applied per request and already gated
+    from hermes_cli.models import resolve_fast_mode_overrides
+
+    base_url = getattr(agent, "base_url", None)
+    if getattr(agent, "api_mode", None) == "anthropic_messages":
+        base_url = getattr(agent, "_anthropic_base_url", None) or base_url
+    try:
+        return resolve_fast_mode_overrides(
+            getattr(agent, "model", None),
+            provider=provider or getattr(agent, "provider", None), base_url=base_url, tier=tier,
+        ) or {}
+    except Exception:
+        # A gate failure must not resurrect the previous route's params.
+        return {}
+
+
+def strip_route_scoped(overrides: Any) -> dict[str, Any]:
+    """Copy of ``overrides`` without the route-scoped fast-mode keys."""
+    cleaned = dict(overrides or {})
+    for key in ROUTE_SCOPED_OVERRIDE_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
 
 
 def parse_service_tier(raw: Any) -> str | None:

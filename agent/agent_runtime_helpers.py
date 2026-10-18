@@ -2100,8 +2100,15 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
     """Re-derive the switched-to provider's ``request_overrides`` (custom_providers ``extra_body``).
     Matches by provider key, base_url AND model (same rule as
     ``agent_init._merge_custom_provider_extra_body``) so a different model at the same endpoint
-    never inherits another's ``extra_body``. Stale ``extra_body`` cleared; ``service_tier``/``speed`` kept."""
+    never inherits another's ``extra_body``. Stale ``extra_body`` cleared.
+
+    The fast-mode keys (``speed`` / ``service_tier``) are route-scoped, so they are dropped and
+    re-derived through the fast-mode gate for the destination route instead of being carried
+    over: an Anthropic ``speed`` reaching an OpenAI-compatible fallback raises
+    ``TypeError: Completions.create() got an unexpected keyword argument 'speed'`` before the
+    request is sent, failing every rung of the chain (#122010)."""
     from agent.agent_init import _custom_provider_extra_body_for_agent
+    from agent.fast_mode import rederive_for_route, strip_route_scoped
     # Prefer the init-time cache (agent._custom_providers); reload only if absent.
     custom_providers = getattr(agent, "_custom_providers", None)
     if custom_providers is None:
@@ -2118,6 +2125,10 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
     overrides.pop("extra_body", None)  # always drop the previous provider's extra_body
     if new_extra_body:
         overrides["extra_body"] = dict(new_extra_body)
+    # Fast-mode params belong to the route, not to the session: never carry them across the
+    # switch unre-derived.
+    overrides = strip_route_scoped(overrides)
+    overrides.update(rederive_for_route(agent, new_provider))
     agent.request_overrides = overrides
 
 

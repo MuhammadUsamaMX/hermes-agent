@@ -37,43 +37,49 @@ CUSTOM_PROVIDERS = [
 ]
 
 
-def _agent(*, model, base_url, request_overrides, custom_providers=CUSTOM_PROVIDERS):
+def _agent(*, model, base_url, request_overrides, custom_providers=CUSTOM_PROVIDERS,
+           provider="custom", service_tier=None):
     a = _Agent()
     # switch_model() sets these on the live agent before calling the helper.
     a.model = model
     a.base_url = base_url
-    a.provider = "custom"
+    a.provider = provider
     a.request_overrides = request_overrides
     a._custom_providers = custom_providers  # init-time cache the helper reads
+    a.service_tier = service_tier  # None unless a static /fast tier is on
     return a
 
 
 def test_switch_applies_matched_provider_extra_body():
     """Switching to the matching provider+model applies its extra_body and
-    preserves non-provider overrides (service_tier/speed from /fast)."""
+    preserves overrides that aren't route-scoped fast-mode params (#122010)."""
     a = _agent(
         model="think-model",
         base_url="http://10.0.0.1:8000/v1",
-        request_overrides={"service_tier": "priority"},
+        request_overrides={"service_tier": "priority", "seed": 7},
     )
     arh._apply_switched_provider_request_overrides(a, "custom:main-think")
     assert a.request_overrides["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
-    assert a.request_overrides["service_tier"] == "priority"  # preserved
+    assert a.request_overrides["seed"] == 7  # preserved
+    # service_tier is route-scoped: dropped here, re-derived only if the destination
+    # route's fast-mode gate approves it (this local route does not).
+    assert "service_tier" not in a.request_overrides
 
 
 def test_switch_to_noncustom_clears_stale_extra_body():
     """Switching to a built-in provider clears the previous provider's extra_body."""
     a = _agent(
-        model="claude-x",
+        model="claude-x",  # not fast-capable -> the gate approves no fast params
         base_url="https://api.anthropic.com",
         request_overrides={
             "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
             "service_tier": "priority",
         },
+        provider="anthropic",
     )
     arh._apply_switched_provider_request_overrides(a, "anthropic")
     assert "extra_body" not in a.request_overrides  # stale extra_body cleared
-    assert a.request_overrides["service_tier"] == "priority"  # preserved
+    assert "service_tier" not in a.request_overrides  # route-scoped, re-derived per route
 
 
 def test_switch_from_none_overrides():
