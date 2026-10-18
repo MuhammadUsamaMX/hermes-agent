@@ -1,5 +1,6 @@
 """Regression tests for scanner-safe GitHub credential extraction (#22722)."""
 
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -82,3 +83,34 @@ def test_rejects_ambiguous_lookalike_or_malformed_credentials(tmp_path, credenti
     assert result.returncode == 1
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_helper_defers_annotation_evaluation_so_it_imports_on_python_39():
+    """PEP 604 unions must not be evaluated at import time.
+
+    The helper is documented as a standalone ``python3 <path>`` invocation, so it
+    has to import on interpreters older than the ``requires-python`` floor the
+    package itself declares. Without ``from __future__ import annotations`` the
+    ``str | None`` annotation on ``_decode`` is evaluated eagerly and Python 3.9
+    raises ``TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'``
+    at import.
+
+    Asserting the annotations are *strings* pins the actual mechanism, so the
+    test bites on every interpreter (including CI's own) rather than only on a
+    real 3.9 runtime. See #125202.
+    """
+    spec = importlib.util.spec_from_file_location("git_credential_token", HELPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    annotations = module._decode.__annotations__
+
+    assert annotations, "expected _decode to carry annotations"
+    non_postponed = {
+        name: value for name, value in annotations.items() if not isinstance(value, str)
+    }
+    assert non_postponed == {}, (
+        "helper annotations are evaluated at import time, so PEP 604 unions crash "
+        "on Python 3.9; add 'from __future__ import annotations' (#125202)"
+    )
