@@ -850,9 +850,18 @@ class BatchRunner:
         self._print_summary(results, total_tool_stats, total_reasoning_stats, kept, batch_files_found, start_time)
 
 
-def _split_csv(value: Optional[str]) -> Optional[List[str]]:
-    """Comma-separated CLI string to a list of stripped items; ``None`` when empty."""
-    return [p.strip() for p in value.split(",")] if value else None
+def _split_csv(value: Any) -> Optional[List[str]]:
+    """Normalize a CLI comma-separated flag to a list of items; ``None`` when empty.
+
+    ``fire`` literal-evaluates every flag value, so the documented
+    ``--providers_allowed=anthropic,openai`` already arrives as a tuple while a value
+    containing a space (``anthropic, ,openai``) stays a string. Both forms are
+    accepted, and blank items are dropped rather than passed on as a provider named "".
+    """
+    if not value:
+        return None
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [s for s in (str(p).strip() for p in items) if s] or None
 
 
 def main(
@@ -980,7 +989,9 @@ def main(
         runner = BatchRunner(
             dataset_file=dataset_file,
             batch_size=batch_size,
-            run_name=run_name,
+            # fire literal-evaluates a date-style name (20260926) into an int, but it is
+            # used as a path segment below, so coerce it. Absence is rejected above.
+            run_name=str(run_name),
             distribution=distribution,
             max_iterations=max_turns,
             base_url=base_url,
