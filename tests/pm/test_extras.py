@@ -177,6 +177,34 @@ def test_ensure_import_respects_terminal_decline_without_installing(monkeypatch,
     assert synced == []
 
 
+def test_ensure_import_refuses_to_block_a_running_event_loop(monkeypatch, synced):
+    """#125607: adapter start runs ON the gateway event loop
+    (platform_registry.create_adapter <- _start_one_profile_adapters, an async def).
+    A lazy install there freezes the loop until the liveness watchdog exits 75 and the
+    supervisor respawns, so the adapter must degrade instead of blocking."""
+    import asyncio
+
+    monkeypatch.setattr(extras, "available", lambda _: False)
+
+    async def start_adapter():
+        extras.ensure_import("telegram")
+
+    with pytest.raises(pm.InstallError) as excinfo:
+        asyncio.run(start_adapter())
+
+    # Names the one command the operator can run out-of-band.
+    assert "hermes pm install --extra telegram" in str(excinfo.value)
+    assert synced == []  # never started a blocking install on the loop
+
+
+def test_ensure_import_still_installs_off_the_event_loop(monkeypatch, synced):
+    """The guard is loop-specific: a plain CLI call has no running loop and still installs."""
+    assert extras._on_event_loop_thread() is False
+    monkeypatch.setattr(extras, "available", lambda _: False)
+    extras.ensure_import("fal")
+    assert synced == [["fal"]]
+
+
 def test_ensure_import_propagates_install_error(monkeypatch):
     def boom(x=None):
         raise pm.InstallError("venv", "lazy installs are disabled")

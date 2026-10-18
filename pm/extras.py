@@ -176,6 +176,23 @@ def _evaluate_in_runtime(marker: str, environment: dict[str, str]) -> bool:
     return result.stdout.strip() == "1"
 
 
+def _on_event_loop_thread() -> bool:
+    """Is the calling thread currently running an asyncio event loop?
+
+    A lazy install spawns a blocking PM subprocess. On a loop thread that
+    freezes every other task for the length of the install, so this detects
+    exactly the contexts where installing must not be attempted inline
+    (#125607). Off the loop the install is unremarkable and still runs.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def install_hint(extra: str) -> str:
     """The one command users are told to run for a missing extra."""
     return f"hermes pm install --extra {extra}"
@@ -198,6 +215,21 @@ def ensure_import(extra: str) -> None:
         )
     import sys
     from pm.package import InstallError
+
+    # Never install (or prompt) on an event-loop thread: adapter start runs there
+    # (platform_registry.create_adapter <- the async _start_*_profile_adapters),
+    # and a blocking install freezes the loop until the liveness watchdog exits 75
+    # and the supervisor respawns — a crash loop, not a slow start (#125607).
+    # A daemon cannot prompt either: the operator is not at this stdin, and with
+    # lazy installs disabled the "yes" answer could not have installed anything.
+    if _on_event_loop_thread():
+        raise InstallError(
+            "venv",
+            f"extra {extra!r} is missing and this call is on the event loop, where a "
+            f"lazy install would block every channel until the watchdog restarts the "
+            f"gateway; the adapter degrades without it",
+            install_hint(extra),
+        )
 
     # prompt_toolkit already owns stdin during a CLI turn; never read from it.
     app_running = False
