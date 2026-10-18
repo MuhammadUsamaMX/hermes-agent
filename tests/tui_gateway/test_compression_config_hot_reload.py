@@ -326,3 +326,117 @@ def test_apply_live_compression_config_is_self_contained():
     _apply_live_compression_config(agent, {"compression": {"enabled": True}})
     assert agent.compression_enabled is True
     assert agent.codex_responses_native_compaction is False
+
+
+# ── External context engines (#103410) ───────────────────────────────────
+# ``agent.context_compressor`` only holds a ``ContextCompressor`` when no
+# external engine is selected. ``agent_init._build_context_engine`` installs the
+# plugin (``context.engine`` → LCMEngine) in that SAME slot, and plugins
+# deliberately do not implement the built-in internals. The live sync assumed a
+# single compressor type and blew up on ``_coerce_threshold_tokens_cap`` — the
+# caller swallows it as a warning, so every ``compression.*`` hot-reload was
+# silently skipped for those sessions. External engines own compaction policy
+# (#44439): the agent-level flags still apply, the engine itself is left alone.
+
+
+class _FakeLCMEngine:
+    """Stand-in for an external context engine: the ``ContextEngine`` surface,
+    none of the ``ContextCompressor`` internals the live sync used to touch."""
+
+    name = "lcm"
+
+    def __init__(self):
+        self.model_thresholds = {}
+        self.context_length = 128_000
+
+    def update_model(self, **kwargs):
+        pass
+
+
+def _external_engine_session():
+    engine = _FakeLCMEngine()
+    agent = SimpleNamespace(
+        model="external-engine-model",
+        provider="",
+        base_url="",
+        context_compressor=engine,
+        compression_enabled=True,
+        compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+    )
+    return {"agent": agent, "session_key": "session-103410"}, engine
+
+
+def test_live_config_sync_leaves_external_context_engine_untouched():
+    """The crash: agent-level flags apply, the engine keeps its own policy."""
+    from tui_gateway.session_compression import _apply_live_compression_config
+
+    session, engine = _external_engine_session()
+
+    _apply_live_compression_config(
+        session["agent"],
+        {"compression": {"threshold_tokens": 100_000, "proactive_prune_tokens": 48_000,
+                         "idle_compact_after_seconds": 1800}},
+    )
+
+    assert session["agent"].compression_idle_compact_after_seconds == 1800
+    # No built-in attributes may be grafted onto an engine that owns its policy.
+    assert not hasattr(engine, "tail_mode")
+    assert not hasattr(engine, "threshold_tokens_cap")
+    assert not hasattr(engine, "_config_threshold_percent")
+    assert not hasattr(engine, "summary_target_ratio")
+
+
+def test_live_sync_with_external_engine_does_not_warn(monkeypatch, caplog):
+    """The reported symptom: a warning logged on every config change for LCM sessions."""
+    session, _engine = _external_engine_session()
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"compression": {"threshold_tokens": 100_000, "tail_mode": "lean"}},
+    )
+
+    with caplog.at_level("WARNING"):
+        server._sync_agent_compression_with_config("sid-103410", session)
+
+    assert "Could not apply live compression config" not in caplog.text
+
+
+def test_live_sync_with_external_engine_applies_agent_flags(monkeypatch):
+    """Everything the engine does NOT own still hot-reloads for LCM sessions."""
+    session, _engine = _external_engine_session()
+    session["agent"].compression_enabled = False
+    session["agent"].codex_responses_native_compaction = False
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "compression": {
+                "enabled": True,
+                "idle_compact_after_seconds": 900,
+                "codex_responses_native": True,
+                "codex_responses_compact_threshold": 120_000,
+            }
+        },
+    )
+
+    server._sync_agent_compression_with_config("sid-103410", session)
+
+    agent = session["agent"]
+    assert agent.compression_enabled is True
+    assert agent.compression_idle_compact_after_seconds == 900
+    assert agent.codex_responses_native_compaction is True
+    assert agent.codex_responses_compact_threshold == 120_000
+
+
+def test_live_sync_with_builtin_compressor_still_applies_cap(monkeypatch):
+    """Guard against over-broad skipping: a real ContextCompressor is still updated."""
+    session, compressor = _neutral_session()
+    _sync_with_cfg(
+        monkeypatch,
+        session,
+        {"model": {"context_length": 600_000}, "compression": {"threshold_tokens": 100_000}},
+    )
+    assert compressor.threshold_tokens_cap == 100_000
+    assert compressor.threshold_tokens == 100_000

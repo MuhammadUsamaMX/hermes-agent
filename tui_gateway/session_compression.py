@@ -112,7 +112,15 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     with contextlib.suppress(TypeError, ValueError):
         agent.compression_idle_compact_after_seconds = max(0, int(compression.get("idle_compact_after_seconds", 0) or 0))
     cc = getattr(agent, "context_compressor", None)
-    if cc is None:
+    from agent.context_compressor import ContextCompressor
+    if not isinstance(cc, ContextCompressor):
+        # Not the built-in compressor: an external context engine plugin (``context.engine``)
+        # occupies the SAME ``agent.context_compressor`` slot (agent_init._build_context_engine)
+        # and deliberately does not implement these internals — touching them raised
+        # AttributeError, which the caller downgraded to a warning, so live compression
+        # hot-reload was silently skipped for every engine-backed session (#103410). External
+        # engines own compaction policy (#44439): leave the plugin untouched. The agent-level
+        # flags above are the host's own and still apply.
         return
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))
