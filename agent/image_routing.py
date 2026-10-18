@@ -554,7 +554,7 @@ def cap_image_file_for_attachment(path: Path, *, max_bytes: Optional[int] = None
     if (stat_bytes * 4) // 3 + 100 <= budget and stat_bytes > 0:
         return path
     try:
-        from agent.conversation_compression import _IMAGE_SUFFIX_BY_MIME, _data_url_mime
+        from agent.conversation_compression import _IMAGE_SUFFIX_BY_MIME, _data_url_mime, _decode_pixels
         from tools.vision_tools import _resize_image_for_vision
 
         resized = _resize_image_for_vision(
@@ -563,9 +563,8 @@ def cap_image_file_for_attachment(path: Path, *, max_bytes: Optional[int] = None
         if not resized or not isinstance(resized, str) or not resized.startswith("data:"):
             logger.warning("image_routing: could not cap oversized %s for attachment", path.name)
             return path
-        # The accept gate must use the axis that triggered the shrink (see _shrink_data_url).
-        from agent.conversation_compression import _decode_pixels
-
+        # The accept gate must hold both axes: a byte-only gate would accept a byte-larger
+        # re-encode of an oversized-pixel image (see _shrink_data_url).
         dims = _decode_pixels(resized)
         if len(resized) > budget or (dims is not None and max(dims) > _MAX_ATTACHMENT_DIMENSION):
             logger.warning(
