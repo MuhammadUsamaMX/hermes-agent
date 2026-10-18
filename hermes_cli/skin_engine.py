@@ -379,6 +379,26 @@ def _load_skin_from_yaml(path: Path) -> Optional[dict[str, Any]]:
     return None
 
 
+def _drop_nulls(skin_name: str, key: str, mapping: dict[str, Any]) -> dict[str, Any]:
+    """Drop present-but-null entries from a skin section so they inherit instead of overriding.
+
+    In YAML an unquoted ``#`` opens a comment, so the natural way to type a hex color --
+    ``banner_border: #CD7F32`` -- parses as a null value under a null key. Merging that over
+    the default palette handed ``None`` to Rich and prompt_toolkit, which crashed the CLI at
+    startup (``'NoneType' object has no attribute 'strip'`` / ``Wrong color format 'None'``).
+    Null now means unset, exactly like a missing key. See #123777.
+    """
+    nulls = [k for k, v in mapping.items() if v is None]
+    if nulls:
+        logger.warning(
+            "Skin '%s': ignoring empty %s value(s) %s -- if these are hex colors, quote them "
+            "(e.g. banner_border: \"#CD7F32\"); an unquoted '#' starts a YAML comment. "
+            "Inheriting the default skin's value.",
+            skin_name, key, ", ".join(sorted(nulls)),
+        )
+    return {k: v for k, v in mapping.items() if v is not None}
+
+
 def _build_skin_config(data: dict[str, Any]) -> SkinConfig:
     """Build a SkinConfig from a raw dict (built-in or loaded from YAML)."""
     default = _BUILTIN_SKINS["default"]
@@ -387,11 +407,17 @@ def _build_skin_config(data: dict[str, Any]) -> SkinConfig:
     def section(key: str) -> dict[str, Any]:
         value = data.get(key)
         if isinstance(value, dict):
-            return value
+            return _drop_nulls(skin_name, key, value)
         if value is not None:
             logger.warning("Skin '%s' has invalid '%s' section type (%s); ignoring section",
                            skin_name, key, type(value).__name__)
         return {}
+
+    def top(key: str, fallback: Any) -> Any:
+        """A top-level field that is present-but-null means unset: inherit, like a missing key.
+        In YAML an unquoted ``#`` opens a comment, so ``description: #note`` parses as null."""
+        value = data.get(key)
+        return fallback if value is None else value
 
     def merged(key: str) -> dict[str, Any]:
         return {**default.get(key, {}), **section(key)}
@@ -399,13 +425,13 @@ def _build_skin_config(data: dict[str, Any]) -> SkinConfig:
     # "no hand-tuned variant for that polarity" and consumers (the TUI) fall back to `colors`
     # + automatic adaptation, which beats the default's gold light palette under a crimson skin.
     return SkinConfig(
-        name=skin_name, description=data.get("description", ""), colors=merged("colors"),
+        name=skin_name, description=top("description", ""), colors=merged("colors"),
         light_colors=section("light_colors"), dark_colors=section("dark_colors"),
         spinner=merged("spinner"), branding=merged("branding"),
-        tool_prefix=data.get("tool_prefix", default.get("tool_prefix", "┊")),
-        tool_emojis=section("tool_emojis"), banner_logo=data.get("banner_logo", ""),
-        banner_hero=data.get("banner_hero", ""),
-        custom_css=str(data.get("customCSS", "")).strip()[:32768])
+        tool_prefix=top("tool_prefix", default.get("tool_prefix", "┊")),
+        tool_emojis=section("tool_emojis"), banner_logo=top("banner_logo", ""),
+        banner_hero=top("banner_hero", ""),
+        custom_css=top("customCSS", "").strip()[:32768])
 
 
 def list_skins() -> list[dict[str, str]]:
@@ -416,8 +442,10 @@ def list_skins() -> list[dict[str, str]]:
     for f in sorted(skins_path.glob("*.yaml")) if skins_path.is_dir() else ():
         data = _load_skin_from_yaml(f)
         if data and not any(s["name"] == data.get("name", f.stem) for s in result):
-            result.append({"name": data.get("name", f.stem), "description": data.get("description", ""),
-                           "source": "user"})
+            # `data.get("description", "")` returns None for a present-but-null key
+            # (`description:` with nothing after it) — this list is rendered as a table.
+            result.append({"name": data.get("name", f.stem),
+                           "description": data.get("description") or "", "source": "user"})
     return result
 
 

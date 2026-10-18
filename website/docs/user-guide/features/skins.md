@@ -56,6 +56,13 @@ The Desktop app lists your CLI skins next to its own themes in **Settings → Ap
 
 Controls all color values throughout the CLI. Values are hex color strings.
 
+:::caution Quote your hex colors
+An unquoted `#` starts a YAML comment, so `banner_border: #CD7F32` loads as an *empty* value,
+not a color. Always quote hex colors — `banner_border: "#CD7F32"` — or set them with
+`hermes skin set`, which quotes for you. An empty value is treated as unset and inherits the
+default skin's color, and the CLI logs a warning naming the key.
+:::
+
 | Key | Description | Default (`default` skin) |
 |-----|-------------|--------------------------|
 | `banner_border` | Panel border around the startup banner | `#CD7F32` (bronze) |

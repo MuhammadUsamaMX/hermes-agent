@@ -162,6 +162,106 @@ class TestCustomCSS:
         assert load_skin("mono").custom_css == ""
 
 
+class TestNullSkinValues:
+    """A bare ``key:`` in a skin YAML parses as null. In YAML an unquoted ``#`` starts a
+    comment, so the natural way to type a hex color (``banner_border: #CD7F32``) leaves the
+    key null -- which used to override the default palette and crash the CLI at startup
+    (Rich AttributeError / prompt_toolkit ``Wrong color format 'None'``). Null must mean
+    unset-and-inherit, exactly like a missing key. See #123777."""
+
+    @staticmethod
+    def _skins_dir(tmp_path, monkeypatch, filename, body):
+        skins_dir = tmp_path / "skins"
+        skins_dir.mkdir()
+        (skins_dir / filename).write_text(body, encoding="utf-8")
+        monkeypatch.setattr("hermes_cli.skin_engine._skins_dir", lambda: skins_dir)
+        return skins_dir
+
+    def test_unquoted_hex_color_inherits_default(self, tmp_path, monkeypatch):
+        from hermes_cli.skin_engine import load_skin
+
+        self._skins_dir(tmp_path, monkeypatch, "bronze.yaml", (
+            "name: bronze\n"
+            "colors:\n"
+            "  banner_border: #CD7F32\n"
+            "  banner_title: \"#00FF00\"\n"
+        ))
+
+        skin = load_skin("bronze")
+
+        # The nulled key inherits the default palette instead of crashing the renderers.
+        assert skin.get_color("banner_border") == "#CD7F32"
+        # The genuinely quoted sibling still wins.
+        assert skin.get_color("banner_title") == "#00FF00"
+
+    def test_null_values_in_every_section_are_dropped(self, tmp_path, monkeypatch):
+        from hermes_cli.skin_engine import load_skin
+
+        self._skins_dir(tmp_path, monkeypatch, "holes.yaml", (
+            "name: holes\n"
+            "colors:\n"
+            "  banner_border:\n"
+            "spinner:\n"
+            "  waiting_faces:\n"
+            "branding:\n"
+            "  agent_name:\n"
+            "light_colors:\n"
+            "  banner_border:\n"
+            "dark_colors:\n"
+            "  banner_border:\n"
+            "tool_emojis:\n"
+            "  terminal:\n"
+        ))
+
+        skin = load_skin("holes")
+
+        assert skin.get_color("banner_border") == "#CD7F32"  # default
+        assert skin.get_branding("agent_name") == "Hermes Agent"  # default
+        assert skin.light_colors == {}
+        assert skin.dark_colors == {}
+        assert skin.tool_emojis == {}
+        assert skin.spinner.get("waiting_faces", []) == []
+
+    def test_null_top_level_fields_fall_back_to_defaults(self, tmp_path, monkeypatch):
+        from hermes_cli.skin_engine import load_skin
+
+        self._skins_dir(tmp_path, monkeypatch, "bare.yaml", (
+            "name: bare\n"
+            "description:\n"
+            "tool_prefix:\n"
+            "banner_logo:\n"
+            "banner_hero:\n"
+        ))
+
+        skin = load_skin("bare")
+
+        assert skin.description == ""
+        assert skin.tool_prefix == "┊"
+        assert skin.banner_logo == ""
+        assert skin.banner_hero == ""
+
+    def test_null_value_warns_and_points_at_quoting(self, tmp_path, monkeypatch, caplog):
+        self._skins_dir(tmp_path, monkeypatch, "warn.yaml", (
+            "name: warn\n"
+            "colors:\n"
+            "  banner_border: #CD7F32\n"
+        ))
+
+        with caplog.at_level("WARNING", logger="hermes_cli.skin_engine"):
+            from hermes_cli.skin_engine import load_skin
+            load_skin("warn")
+
+        assert any("quote" in r.message.lower() for r in caplog.records)
+
+    def test_list_skins_shows_empty_description_not_none(self, tmp_path, monkeypatch):
+        from hermes_cli.skin_engine import list_skins
+
+        self._skins_dir(tmp_path, monkeypatch, "nodesc.yaml", "name: nodesc\ndescription:\n")
+
+        nodesc = [s for s in list_skins() if s["name"] == "nodesc"][0]
+        assert nodesc["description"] == ""
+
+
 class TestDisplayIntegration:
 
 
