@@ -320,19 +320,35 @@ def _read_claude_code_keychain_payload() -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
-def _keychain_mirror_command(account: str, payload: dict[str, Any]) -> tuple[list[str], str]:
-    """``(argv, stdin)`` that updates the Claude Code Keychain item with ``payload``.
+# ``security -i`` reads stdin in lines of at most 4095 characters and starts a NEW command at the
+# overflow, so a longer line silently loses its tail. #123184 measured the split at exactly this
+# boundary, so the mirror refuses to build an over-long line rather than let ``security`` clip it.
+_SECURITY_INTERACTIVE_LINE_LIMIT = 4095
+
+
+def _keychain_mirror_command(account: str, payload: dict[str, Any]) -> Optional[tuple[list[str], str]]:
+    """``(argv, stdin)`` that updates the Claude Code Keychain item with ``payload``, or None when
+    the payload cannot be written safely.
 
     The command line goes to ``security -i`` on stdin, with the secret hex-encoded (``-X``):
     a bare ``-w`` prompts twice on /dev/tty when a terminal exists (hangs the CLI) and, with
     no terminal, reads only the first line and stores an EMPTY password when the confirmation
     read hits EOF — either way the live token must never sit on argv.
+
+    Returns None rather than an over-long line (#123184): ``security -i`` reads at most
+    ``_SECURITY_INTERACTIVE_LINE_LIMIT`` characters per line and starts a new command at the
+    overflow, so an oversized ``-X`` blob ran ``add-generic-password -U`` with only its leading
+    slice and overwrote the item with JSON cut off mid-token. Claude Code could no longer parse
+    its own login and reported "Not logged in", with the non-zero exit logged only at DEBUG. A
+    caller that gets None must leave the item alone and warn — half-written beats clobbered.
     """
     def quoted(value: str) -> str:  # the ``security -i`` tokenizer: double quotes, backslash escapes
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8").hex()
     line = f"add-generic-password -U -a {quoted(account)} -s {quoted(_CLAUDE_CODE_KEYCHAIN_SERVICE)} -X {encoded}\n"
+    if len(line) > _SECURITY_INTERACTIVE_LINE_LIMIT:
+        return None
     return ["security", "-i"], line
 
 
@@ -601,8 +617,23 @@ def _mirror_claude_code_credentials_to_keychain(
         if not isinstance(oauth, dict) or oauth.get("refreshToken") != spent_refresh_token:
             logger.debug("Keychain mirror skipped: item does not hold the pair that was just rotated")
             return
-        argv, line = _keychain_mirror_command(
+        command = _keychain_mirror_command(
             account, _merge_keychain_credential_payload(existing, access_token, refresh_token, expires_at_ms))
+        if command is None:
+            # #123184: the merged item outgrew one ``security -i`` line. Writing it would store
+            # truncated JSON and log Claude Code out of its own login, so leave the item as it is
+            # and say so — the file we just committed still carries the rotated pair.
+            logger.warning(
+                "Keychain mirror skipped: %r is too large to write through 'security -i' "
+                "(one command line is limited to %d characters, and the merged payload needs %s). "
+                "The item was left untouched rather than overwritten with truncated JSON, so Claude "
+                "Code still holds the old refresh token this rotation spent. Re-run 'claude auth "
+                "login', or give Hermes its own login with 'hermes auth add anthropic'.",
+                _CLAUDE_CODE_KEYCHAIN_SERVICE, _SECURITY_INTERACTIVE_LINE_LIMIT,
+                f"more than {_SECURITY_INTERACTIVE_LINE_LIMIT}",
+            )
+            return
+        argv, line = command
         result = subprocess.run(
             argv, input=line, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             check=False,
@@ -611,7 +642,9 @@ def _mirror_claude_code_credentials_to_keychain(
         logger.debug("Keychain mirror skipped (%s)", e)
         return
     if result.returncode != 0:
-        logger.debug("Keychain mirror failed (rc=%s): %s", result.returncode, (result.stderr or "").strip()[:200])
+        # A write that fails here leaves Claude Code holding a spent refresh token, i.e. logged
+        # out; that is user-visible, so it must not sit at DEBUG where nothing surfaces it (#123184).
+        logger.warning("Keychain mirror failed (rc=%s): %s", result.returncode, (result.stderr or "").strip()[:200])
 
 
 # ── Resolution ──

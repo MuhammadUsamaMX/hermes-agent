@@ -1,6 +1,7 @@
 """Tests for Bug #12905 fixes in agent/anthropic_adapter.py — macOS Keychain support."""
 
 import json
+import logging
 import platform
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from agent.anthropic_credentials import (
     _keychain_mirror_command,
     _merge_keychain_credential_payload,
     _mirror_claude_code_credentials_to_keychain,
+    _SECURITY_INTERACTIVE_LINE_LIMIT,
 )
 
 
@@ -398,6 +400,76 @@ class TestKeychainMirrorCommand:
         assert json.loads(bytes.fromhex(hex_blob)) == payload
 
 
+class TestKeychainMirrorCommandLineLimit:
+    """#123184: ``security -i`` reads stdin in lines of at most 4095 characters and treats the
+    overflow as the start of a SECOND command. An oversized mirror line therefore ran
+    ``add-generic-password -U`` with only the leading slice of the hex payload and overwrote the
+    item with JSON cut off mid-token — Claude Code then reported "Not logged in" while the
+    failure stayed at DEBUG. The builder must refuse to emit a line it cannot round-trip."""
+
+    @staticmethod
+    def _item_with_mcp_oauth(entries: int = 33) -> dict:
+        """The item shape from the report: MCP server OAuth logins live in the same Keychain
+        entry as the Claude Code login, so the payload outgrows one command line."""
+        return {
+            "mcpOAuth": {f"srv-{i:02d}": {"accessToken": "t" * 300, "refreshToken": "r" * 300} for i in range(entries)},
+            "claudeAiOauth": {"accessToken": "a" * 120, "refreshToken": "r" * 120, "expiresAt": 1},
+        }
+
+    def test_oversized_item_is_refused_instead_of_truncated(self):
+        assert _keychain_mirror_command("alice", self._item_with_mcp_oauth()) is None
+
+    def test_the_oversized_fixture_really_exceeds_the_line_limit(self):
+        """Guards the test above: if this fixture ever shrinks below the limit it would pass for
+        the wrong reason and the refusal assertion would stop meaning anything."""
+        payload = self._item_with_mcp_oauth()
+        line = f'add-generic-password -U -a "alice" -s "Claude Code-credentials" -X ' + (
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8").hex()
+        )
+        assert len(line) > _SECURITY_INTERACTIVE_LINE_LIMIT
+
+    def test_the_reported_item_survives_the_round_trip_only_when_refused(self):
+        """The bug's observable harm, stated as a property: a refused write leaves the item
+        byte-identical, so the login stays parseable."""
+        payload = self._item_with_mcp_oauth()
+        stored = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        if _keychain_mirror_command("alice", payload) is None:
+            assert stored == json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+    def test_line_exactly_at_the_limit_is_built_and_the_next_one_is_refused(self):
+        """The limit is exact, not a conservative margin: the largest payload that still fits is
+        written, and the next size up is refused rather than clipped."""
+        def attempt(access_len: int):
+            payload = {"claudeAiOauth": {"accessToken": "a" * access_len, "refreshToken": "r", "expiresAt": 1}}
+            return _keychain_mirror_command("alice", payload)
+
+        # Hex doubles the payload, so the built line grows by 2 per extra access-token character:
+        # binary search for the largest size still accepted. Bounded, so an implementation that
+        # accepts everything fails fast instead of looping.
+        low, high = 0, 4096  # high is already far past anything that can fit
+        while low < high:
+            mid = (low + high + 1) // 2
+            if attempt(mid) is not None:
+                low = mid
+            else:
+                high = mid - 1
+
+        command = attempt(low)
+        assert command is not None, "a single-credential payload must still be mirrorable"
+        assert len(command[1]) <= _SECURITY_INTERACTIVE_LINE_LIMIT
+        # One more character of payload = 2 more hex characters = past the limit.
+        assert attempt(low + 1) is None
+
+    def test_ordinary_item_is_still_mirrorable(self):
+        """The guard must not disable mirroring for the users who are under the limit today."""
+        command = _keychain_mirror_command(
+            "alice", {"claudeAiOauth": {"accessToken": "a" * 120, "refreshToken": "r" * 120, "expiresAt": 1}})
+        assert command is not None
+        argv, line = command
+        assert argv == ["security", "-i"]
+        assert json.loads(bytes.fromhex(line.split(" -X ", 1)[1].strip()))["claudeAiOauth"]["accessToken"] == "a" * 120
+
+
 class TestFindClaudeCodeKeychainItem:
     """``_find_claude_code_keychain_item`` parses one ``find-generic-password -g`` call. ``security``
     prints plain-ASCII attributes quoted but UNescaped, anything else as ``0x<HEX>  "<echo>"``."""
@@ -452,3 +524,36 @@ class TestMirrorClaudeCodeCredentialsToKeychain:
         assert argv == ["security", "-i"]
         assert json.loads(bytes.fromhex(kwargs["input"].split(" -X ", 1)[1].strip()))["claudeAiOauth"] == {
             "accessToken": "A1", "refreshToken": "R1", "expiresAt": 1}
+
+    @pytest.mark.platforms("macos")
+    def test_item_too_large_for_one_command_line_is_left_untouched_and_warned(self, monkeypatch, caplog):
+        """The reported case: the merged item outgrows the ``security -i`` line, so the mirror must
+        not call ``security`` at all (writing would truncate the JSON) and must say so at WARNING.
+        The item keeps the OLD pair — parseable, and Claude Code re-reads the file we just wrote."""
+        oversized = {
+            "claudeAiOauth": {"accessToken": "A0", "refreshToken": "R0", "expiresAt": 0},
+            "mcpOAuth": {f"srv-{i:02d}": {"accessToken": "t" * 300, "refreshToken": "r" * 300} for i in range(33)},
+        }
+        monkeypatch.setattr("agent.anthropic_credentials._find_claude_code_keychain_item", lambda: ("bob", oversized))
+        run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(subprocess, "run", run)
+
+        with caplog.at_level(logging.WARNING, logger="agent.anthropic_credentials"):
+            _mirror_claude_code_credentials_to_keychain("A1", "R1", 1, spent_refresh_token="R0")
+
+        run.assert_not_called()  # never hand `security` a line it would cut in two
+        assert any(record.levelno >= logging.WARNING and "security -i" in record.getMessage()
+                   for record in caplog.records), caplog.text
+
+    @pytest.mark.platforms("macos")
+    def test_write_failure_is_reported_above_debug(self, monkeypatch, caplog):
+        """The mirror is best-effort, but a failure that leaves Claude Code holding a spent
+        refresh token is the user-visible half of this bug: it must not stay at DEBUG."""
+        item = ("bob", {"claudeAiOauth": {"accessToken": "A0", "refreshToken": "R0"}})
+        monkeypatch.setattr("agent.anthropic_credentials._find_claude_code_keychain_item", lambda: item)
+        monkeypatch.setattr(subprocess, "run", lambda argv, **k: MagicMock(returncode=1, stderr="security: boom"))
+
+        with caplog.at_level(logging.WARNING, logger="agent.anthropic_credentials"):
+            _mirror_claude_code_credentials_to_keychain("A1", "R1", 1, spent_refresh_token="R0")
+
+        assert any(record.levelno >= logging.WARNING for record in caplog.records), caplog.text
