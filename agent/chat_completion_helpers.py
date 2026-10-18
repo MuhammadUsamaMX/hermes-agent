@@ -2021,9 +2021,17 @@ def _rescope_fallback_extra_body(agent, old_model: str, old_provider: str, old_b
     """Drop the OLD provider's custom_providers-contributed extra_body keys, then merge the fallback
     provider's own. KEY-SCOPED: a key is dropped only if its value still equals what the old provider's
     config injected — a caller override of the same key won at init and differs, so it survives;
-    keys the new provider redefines are re-added by the merge."""
+    keys the new provider redefines are re-added by the merge.
+
+    Also re-derives the route-scoped fast-mode params (``speed`` / ``service_tier``) for the route
+    the fallback just moved to: they belong to the endpoint, not the session, so an Anthropic
+    ``speed`` carried onto an OpenAI-compatible fallback raises
+    ``TypeError: Completions.create() got an unexpected keyword argument 'speed'`` before the
+    request is sent — failing every rung of the chain and ending the turn with no reply
+    (#122010)."""
     try:
         from agent.agent_init import _custom_provider_extra_body_for_agent, _merge_custom_provider_extra_body
+        from agent.fast_mode import rederive_for_route, strip_route_scoped
         custom_providers = getattr(agent, "_custom_providers", None) or []
         old_provider_eb = _custom_provider_extra_body_for_agent(provider=old_provider, model=old_model, base_url=old_base_url, custom_providers=custom_providers) or {}
         overrides = dict(getattr(agent, "request_overrides", {}) or {})
@@ -2036,6 +2044,12 @@ def _rescope_fallback_extra_body(agent, old_model: str, old_provider: str, old_b
                 overrides.pop("extra_body", None)
             agent.request_overrides = overrides
         _merge_custom_provider_extra_body(agent, custom_providers)
+        # Re-gate the fast-mode params against the NEW route (agent.model/provider/base_url are
+        # already the fallback's by this point). Strip-then-merge so no stale param survives and a
+        # gate failure degrades to "no fast params" rather than the previous route's.
+        rescoped = strip_route_scoped(getattr(agent, "request_overrides", {}))
+        rescoped.update(rederive_for_route(agent, getattr(agent, "provider", None)))
+        agent.request_overrides = rescoped
         logger.info("Fallback %s: extra_body resolved: %s", agent.model, (getattr(agent, "request_overrides", {}) or {}).get("extra_body"))
     except Exception as _eb_err:
         logger.debug("Failed to resolve extra_body for fallback %s; keeping current: %s", agent.model, _eb_err)
