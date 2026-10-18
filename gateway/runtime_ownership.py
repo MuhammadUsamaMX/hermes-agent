@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 import os
 from pathlib import Path
 import stat
 import threading
 from hermes_dir_acl import make_user_dir
+from hermes_state_errors import is_disk_full_error
+
+logger = logging.getLogger(__name__)
 
 
 class OwnershipConflict(RuntimeError):
@@ -169,11 +173,25 @@ class ProfileOwnership:
                         record = {**_build_pid_record(), 'hermes_home': str(home)}
                         if purpose:
                             record['purpose'] = purpose
-                        handle.seek(0)
-                        handle.truncate()
-                        json.dump(record, handle)
-                        handle.flush()
-                        os.fsync(handle.fileno())
+                        try:
+                            handle.seek(0)
+                            handle.truncate()
+                            json.dump(record, handle)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        except OSError as exc:
+                            # The flock is the claim; the JSON body is diagnostic metadata and every
+                            # strict reader fails closed on the empty/torn record a failed write leaves
+                            # behind (status._read_json_file). Losing the *claim* to a full disk turned a
+                            # degraded gateway into exit 1, which a ``Restart=always`` supervisor looped
+                            # indefinitely (#122720). Keep the claim, warn once, and start up.
+                            if not is_disk_full_error(exc):
+                                raise
+                            logger.warning(
+                                'Gateway runtime lock acquired for %s but its PID metadata could not be '
+                                'written because the disk is full; continuing without it.',
+                                path, exc_info=exc,
+                            )
                     except BaseException:
                         handle.close()
                         raise
