@@ -610,6 +610,7 @@ gateway:
     reason_label: "Чому позначено"
     default_reason: "небезпечна команда"
     smart_deny_line: "Smart DENY: перевизначення власника діє лише для цієї однієї операції."
+    truncated_notice: "⚠️ Попередній перегляд ОБРЕЗАНО — повна команда містить {length} символів (SHA-256: {digest}). Лише відмова: не підтверджуйте те, чого не бачите."
     smart_deny_heading: "⚠️ **Smart DENY — перевизначення власника для однієї операції:**"
     timed_out_notice: "⌛ Час схвалення минув через {window} — команду НЕ виконано. Попросіть мене спробувати ще раз, якщо вона все ще потрібна, або збільште approvals.timeout у config.yaml."
     timed_out_card_body: "{notice}\n```\n{command}\n```"

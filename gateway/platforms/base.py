@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import ipaddress
 import logging
@@ -428,7 +429,8 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
 from gateway.platforms.base_exec_approval import (
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
-    ea_reason_label_text, ea_smart_deny_line_text, format_approval_deadline_line)
+    ea_reason_label_text, ea_smart_deny_line_text, ea_truncated_notice_text,
+    format_approval_deadline_line)
 from gateway.platforms.base_streaming_tts import (
     AudioFormat, StreamingTTSHandle, streaming_tts_should_skip_whole_file, streaming_tts_turn_key)
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
@@ -2793,6 +2795,23 @@ class BasePlatformAdapter(ABC):
         """Chars of command preview that fit; platforms with a hard message cap compute it."""
         return self._EA_CMD_BUDGET
 
+    def _ea_truncated(self, command: str, description: Optional[str], smart_denied: bool) -> bool:
+        """True when the escaped command preview does not fit the platform budget (#62359):
+        an un-reviewable preview, so the prompt must say so and must not offer approval."""
+        if description is None:
+            description = ea_default_reason_text()
+        if self._EA_REASON_BUDGET:
+            description = self._ea_fit(str(description or ""), self._EA_REASON_BUDGET)
+        budget = self._exec_approval_cmd_budget(str(description), smart_denied)
+        return self.message_len_fn(self._ea_escape(str(command or ""))) > budget
+
+    def _ea_truncation_notice(self, command: str) -> str:
+        """Escaped notice line stating the full command's length + SHA-256 digest, newline
+        terminated: the operator can verify a cut preview out-of-band (#62359)."""
+        raw = str(command or "")
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return self._ea_escape(ea_truncated_notice_text(len(raw), digest)) + "\n"
+
     def _ea_deadline_line(self) -> str:
         """The "doing nothing means it will NOT run" line, with the configured approvals.timeout."""
         return self._EA_DEADLINE_PREFIX + self._ea_escape(format_approval_deadline_line(approval_timeout_seconds()))
@@ -2806,10 +2825,17 @@ class BasePlatformAdapter(ABC):
             description = ea_default_reason_text()
         if self._EA_REASON_BUDGET:
             description = self._ea_fit(str(description or ""), self._EA_REASON_BUDGET)
-        cmd_preview = self._ea_fit(
-            str(command or ""), self._exec_approval_cmd_budget(description, smart_denied))
+        budget = self._exec_approval_cmd_budget(str(description), smart_denied)
+        notice = self._ea_truncation_notice(command) if self._ea_truncated(
+            command, str(description or ""), smart_denied) else ""
+        # The notice is budgeted (#62359), not appended uncounted: it shares the platform cap
+        # with the preview so the message still fits the wire limit.
+        if notice:
+            budget = max(0, budget - self.message_len_fn(notice))
+        cmd_preview = self._ea_fit(str(command or ""), budget)
         text = (f"{self._EA_HEADER}"
                 f"{self._EA_CODE_OPEN}{self._ea_escape(cmd_preview)}{self._EA_CODE_CLOSE}"
+                f"{notice}"
                 f"{self._EA_REASON_LABEL}{self._ea_escape(description)}"
                 f"{self._ea_deadline_line()}")
         return text + self._EA_SMART_DENY_LINE if smart_denied else text
@@ -2823,10 +2849,14 @@ class BasePlatformAdapter(ABC):
         return ea_action_labels()
 
     def _exec_approval_actions(
-            self, *, allow_permanent: bool, allow_session: bool, smart_denied: bool) -> list[tuple[str, str, str]]:
+            self, *, allow_permanent: bool, allow_session: bool, smart_denied: bool,
+            truncated: bool = False) -> list[tuple[str, str, str]]:
         """``(label, choice, style)`` rows for the approval buttons. A smart deny is an owner
         override for one operation only, so it offers neither the session nor the permanent tier;
-        the permanent tier is never offered without the session tier."""
+        the permanent tier is never offered without the session tier. A truncated command preview
+        is deny-only (#62359): approving a command you cannot read is not consent."""
+        if truncated:
+            return [(self._EA_ACTION_LABELS["deny"], "deny", self._EA_ACTION_STYLES.get("deny", ""))]
         choices = ["once"]
         if not smart_denied and allow_session:
             choices.append("session")
@@ -2856,7 +2886,9 @@ class BasePlatformAdapter(ABC):
             description=description, smart_denied=smart_denied,
             text=self._format_exec_approval(command, description, smart_denied),
             actions=self._exec_approval_actions(
-                allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied))
+                allow_permanent=allow_permanent, allow_session=allow_session,
+                smart_denied=smart_denied,
+                truncated=self._ea_truncated(command, description, smart_denied)))
         return await self._send_exec_approval_prompt(prompt)
 
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:

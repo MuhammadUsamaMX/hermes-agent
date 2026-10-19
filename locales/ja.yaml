@@ -610,6 +610,7 @@ gateway:
     reason_label: "フラグの理由"
     default_reason: "危険なコマンド"
     smart_deny_line: "スマート DENY: オーナーによる上書きはこの 1 回の操作にのみ適用されます。"
+    truncated_notice: "⚠️ プレビューは切り詰められています — コマンド全体は {length} 文字です（SHA-256: {digest}）。拒否のみ：見えないものを承認しないでください。"
     smart_deny_heading: "⚠️ **スマート DENY — 1 回の操作に限ったオーナーの上書き:**"
     timed_out_notice: "⌛ 承認は {window} でタイムアウトしました — コマンドは実行されていません。必要であれば再度お知らせください。または config.yaml の approvals.timeout を増やしてください。"
     timed_out_card_body: "{notice}\n```\n{command}\n```"

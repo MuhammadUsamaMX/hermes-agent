@@ -610,6 +610,7 @@ gateway:
     reason_label: "سبب التنبيه"
     default_reason: "أمر خطير"
     smart_deny_line: "رفض ذكي: تجاوز المالك ينطبق على هذه العملية وحدها."
+    truncated_notice: "⚠️ تم اقتطاع المعاينة — الأمر الكامل {length} حرفًا (SHA-256: {digest}). الرفض فقط: لا توافق على ما لا تراه."
     smart_deny_heading: "⚠️ **رفض ذكي — تجاوز المالك لعملية واحدة:**"
     timed_out_notice: "⌛ انتهت مهلة الموافقة بعد {window} — لم يُنفَّذ الأمر. اطلب منّي المحاولة مجددًا إن كنت لا تزال تريده، أو ارفع قيمة approvals.timeout في config.yaml."
     timed_out_card_body: "{notice}\n```\n{command}\n```"

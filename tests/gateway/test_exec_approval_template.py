@@ -7,6 +7,8 @@ sweeps. It now comes from one place; adapters only render it.
 
 from typing import Any, Dict
 
+import hashlib
+
 import pytest
 
 from gateway.config import Platform, PlatformConfig
@@ -69,10 +71,15 @@ async def test_command_is_truncated_to_the_platform_budget():
         _EA_CMD_BUDGET = 20
 
     adapter = _Small()
-    await adapter.send_exec_approval("chat", "x" * 100, "sess")
+    command = "x" * 100
+    await adapter.send_exec_approval("chat", command, "sess")
     (prompt,) = adapter.prompts
-    assert "x" * 20 + "..." in prompt.text and "x" * 21 not in prompt.text
-    assert prompt.command == "x" * 100  # the raw command stays available for embeds/cards
+    # The truncation notice shares the budget (#62359), so a 20-char budget leaves the preview
+    # with nothing; the full command is never rendered either way, and the notice carries the
+    # digest so the operator can still verify what was cut.
+    assert command not in prompt.text
+    assert hashlib.sha256(command.encode("utf-8")).hexdigest() in prompt.text
+    assert prompt.command == command  # the raw command stays available for embeds/cards
 
 
 def test_runner_only_offers_buttons_to_adapters_that_render_them():
@@ -88,3 +95,36 @@ def test_runner_only_offers_buttons_to_adapters_that_render_them():
 
     assert _renders_exec_approval_buttons(_DuckTyped) is True
     assert _renders_exec_approval_buttons(object) is False
+
+
+# ── Truncated command preview must be deny-only and state length + digest (#62359) ──
+
+
+@pytest.mark.asyncio
+async def test_truncated_command_is_deny_only_and_states_length_and_digest():
+    """A preview the operator cannot read in full must not offer one-click approval, and the
+    notice must carry the full command's length + SHA-256 digest so it can be verified
+    out-of-band (#62359)."""
+    class _Small(_Buttons):
+        _EA_CMD_BUDGET = 20
+
+    adapter = _Small()
+    command = "x" * 100
+    await adapter.send_exec_approval("chat", command, "sess")
+    (prompt,) = adapter.prompts
+
+    assert prompt.choices == ["deny"]
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    assert str(len(command)) in prompt.text
+    assert digest in prompt.text
+    assert prompt.command == command  # raw command stays available for embeds/cards
+
+
+@pytest.mark.asyncio
+async def test_untruncated_command_keeps_choice_set_and_no_truncation_notice():
+    adapter = _Buttons()
+    await adapter.send_exec_approval("chat", "rm -rf /tmp/x", "sess")
+    (prompt,) = adapter.prompts
+
+    assert prompt.choices == ["once", "session", "always", "deny"]
+    assert "SHA-256" not in prompt.text

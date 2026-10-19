@@ -47,6 +47,12 @@ def ea_default_reason_text() -> str:
     return t("gateway.exec_approval.default_reason")
 
 
+def ea_truncated_notice_text(length: int, digest: str) -> str:
+    """Localized notice for a cut command preview (#62359): carries the FULL command's character
+    ``length`` and SHA-256 ``digest`` so the operator can verify it out-of-band."""
+    return t("gateway.exec_approval.truncated_notice", length=length, digest=digest)
+
+
 def ea_action_labels() -> dict[str, str]:
     """Localized ``choice -> button label`` for the four approval tiers."""
     return {

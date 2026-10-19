@@ -610,6 +610,7 @@ gateway:
     reason_label: "标记原因"
     default_reason: "危险命令"
     smart_deny_line: "智能拒绝：所有者覆盖仅对本次操作生效。"
+    truncated_notice: "⚠️ 预览已截断 — 完整命令共 {length} 个字符（SHA-256: {digest}）。仅可拒绝：不要批准你看不到的内容。"
     smart_deny_heading: "⚠️ **智能拒绝——所有者对单次操作的覆盖：**"
     timed_out_notice: "⌛ 审批已超时（{window}）——命令未运行。如仍需要，请让我再试一次，或提高 config.yaml 中的 approvals.timeout。"
     timed_out_card_body: "{notice}\n```\n{command}\n```"

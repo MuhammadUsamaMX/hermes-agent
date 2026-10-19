@@ -610,6 +610,7 @@ gateway:
     reason_label: "Hoekom dit gemerk is"
     default_reason: "gevaarlike opdrag"
     smart_deny_line: "Slim WEIER: eienaar-oorskrywing geld slegs vir hierdie een bewerking."
+    truncated_notice: "⚠️ Voorskou AFGEKORT — die volle opdrag is {length} karakters (SHA-256: {digest}). Slegs weier: goedkeur nie wat jy nie kan sien nie."
     smart_deny_heading: "⚠️ **Slim WEIER — eienaar-oorskrywing vir een bewerking:**"
     timed_out_notice: "⌛ Goedkeuring het na {window} uitgetel — die opdrag is NIE uitgevoer nie. Vra my om weer te probeer as jy dit steeds wil hê, of verhoog approvals.timeout in config.yaml."
     timed_out_card_body: "{notice}\n```\n{command}\n```"

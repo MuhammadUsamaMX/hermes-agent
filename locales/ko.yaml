@@ -610,6 +610,7 @@ gateway:
     reason_label: "표시된 이유"
     default_reason: "위험한 명령"
     smart_deny_line: "스마트 거부: 소유자 재정의는 이 작업 한 번에만 적용돼요."
+    truncated_notice: "⚠️ 미리보기가 잘렸습니다 — 전체 명령은 {length}자입니다 (SHA-256: {digest}). 거부만 가능: 보이지 않는 것은 승인하지 마세요."
     smart_deny_heading: "⚠️ **스마트 거부 — 한 번의 작업에 대한 소유자 재정의:**"
     timed_out_notice: "⌛ {window} 후 승인 시간이 초과되어 명령이 실행되지 않았어요. 여전히 원하시면 다시 요청하시거나, config.yaml의 approvals.timeout을 늘려 주세요."
     timed_out_card_body: "{notice}\n```\n{command}\n```"

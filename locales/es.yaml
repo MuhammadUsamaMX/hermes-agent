@@ -610,6 +610,7 @@ gateway:
     reason_label: "Por qué se marcó"
     default_reason: "comando peligroso"
     smart_deny_line: "DENEGACIÓN inteligente: la anulación del propietario aplica solo a esta operación."
+    truncated_notice: "⚠️ Vista previa TRUNCADA — el comando completo tiene {length} caracteres (SHA-256: {digest}). Solo denegar: no apruebes lo que no puedes ver."
     smart_deny_heading: "⚠️ **DENEGACIÓN inteligente — anulación del propietario para una sola operación:**"
     timed_out_notice: "⌛ La aprobación expiró tras {window} — el comando NO se ejecutó. Pídeme que lo intente de nuevo si aún lo quieres, o aumenta approvals.timeout en config.yaml."
     timed_out_card_body: "{notice}\n```\n{command}\n```"

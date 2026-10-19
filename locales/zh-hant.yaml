@@ -610,6 +610,7 @@ gateway:
     reason_label: "標記原因"
     default_reason: "危險指令"
     smart_deny_line: "智慧拒絕：擁有者覆寫僅適用於這一次操作。"
+    truncated_notice: "⚠️ 預覽已截斷 — 完整命令共 {length} 個字元（SHA-256: {digest}）。僅可拒絕：不要核准你看不到的內容。"
     smart_deny_heading: "⚠️ **智慧拒絕 — 擁有者覆寫僅限單次操作：**"
     timed_out_notice: "⌛ 批准已逾時（{window}）— 指令「未」執行。如果你仍需要，請再要求我試一次，或在 config.yaml 中提高 approvals.timeout。"
     timed_out_card_body: "{notice}\n```\n{command}\n```"

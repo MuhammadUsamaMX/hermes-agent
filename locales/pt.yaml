@@ -610,6 +610,7 @@ gateway:
     reason_label: "Motivo da sinalização"
     default_reason: "comando perigoso"
     smart_deny_line: "NEGAR inteligente: a exceção do proprietário vale apenas para esta operação."
+    truncated_notice: "⚠️ Pré-visualização TRUNCADA — o comando completo tem {length} caracteres (SHA-256: {digest}). Apenas recusar: não aprove o que não consegue ver."
     smart_deny_heading: "⚠️ **NEGAR inteligente — exceção do proprietário para uma operação:**"
     timed_out_notice: "⌛ A aprovação expirou após {window} — o comando NÃO foi executado. Peça para eu tentar novamente se ainda quiser, ou aumente approvals.timeout em config.yaml."
     timed_out_card_body: "{notice}\n```\n{command}\n```"
