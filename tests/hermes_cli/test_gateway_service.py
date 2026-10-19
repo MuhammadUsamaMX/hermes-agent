@@ -1761,6 +1761,59 @@ class TestProfileArg:
         assert program_args[separator - 2:separator] == ["--error-log", str(profile_dir / "logs" / "gateway.error.log")]
         assert "--replace" not in program_args
 
+    def test_launchd_plist_direct_network_identity_runs_gateway_as_job_root(self, tmp_path, monkeypatch):
+        """``gateway.launchd_network_identity: direct`` makes the gateway launcher the launchd job
+        root (#123118): TCC/Privacy & Security attribution follows the job root, so the osascript
+        wrapper both hides Hermes' identity in the permissions UI and breaks responsibility-based
+        grants (Calendar, Files & Folders). Logs stay wired via the plist's own keys."""
+        from hermes_cli import gateway_launchd
+        profile_dir = tmp_path / ".hermes" / "profiles" / "mybot"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: "/usr/bin/python3")
+        monkeypatch.setattr(gateway_launchd, "configured_launchd_network_identity", lambda config=None: "direct")
+
+        plist = gateway_cli.generate_launchd_plist()
+        parsed = plistlib.loads(plist.encode("utf-8"))
+        program_args = parsed["ProgramArguments"]
+
+        assert program_args[0] == "/usr/bin/python3"
+        assert "osascript" not in " ".join(program_args)
+        assert program_args[-5:] == ["--profile", "mybot", "gateway", "run", "--external-supervisor"]
+        separator = program_args.index("--")
+        assert program_args[separator - 2:separator] == ["--error-log", str(profile_dir / "logs" / "gateway.error.log")]
+        assert "--replace" not in program_args
+        assert parsed["StandardOutPath"] == str(profile_dir / "logs" / "gateway.log")
+        assert parsed["StandardErrorPath"] == str(profile_dir / "logs" / "gateway.error.log")
+
+    def test_launchd_plist_unknown_network_identity_falls_back_to_osascript(self, tmp_path, monkeypatch):
+        """An unknown ``gateway.launchd_network_identity`` value must never silently drop the Local
+        Network wrapper (#71206): fall back to the osascript default instead."""
+        from hermes_cli import gateway_launchd
+        profile_dir = tmp_path / ".hermes"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: "/usr/bin/python3")
+        monkeypatch.setattr(gateway_launchd, "configured_launchd_network_identity", lambda config=None: "banana")
+
+        program_args = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))["ProgramArguments"]
+        assert program_args[:4] == ["/usr/bin/osascript", "-l", "JavaScript", "-e"]
+
+    def test_configured_launchd_network_identity_reads_gateway_config(self):
+        """Resolver contract: only an explicit ``direct`` selects direct mode; missing, unknown,
+        or malformed values keep the Local Network default."""
+        from hermes_cli.gateway_launchd import configured_launchd_network_identity
+        assert configured_launchd_network_identity({}) == "osascript"
+        assert configured_launchd_network_identity({"gateway": {}}) == "osascript"
+        assert configured_launchd_network_identity({"gateway": {"launchd_network_identity": "osascript"}}) == "osascript"
+        assert configured_launchd_network_identity({"gateway": {"launchd_network_identity": "direct"}}) == "direct"
+        assert configured_launchd_network_identity({"gateway": {"launchd_network_identity": 42}}) == "osascript"
+        assert configured_launchd_network_identity({"gateway": "not-a-mapping"}) == "osascript"
+
     def test_launchd_osascript_wrapper_round_trips_shell_hostile_paths(self, tmp_path, monkeypatch):
         """A home with spaces, quotes and a backslash survives shlex + JXA + plist quoting."""
         profile_dir = tmp_path / 'my "odd" dir \\ here' / ".hermes"

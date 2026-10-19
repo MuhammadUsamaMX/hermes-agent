@@ -2113,6 +2113,15 @@ DEFAULT_CONFIG = {
         "export": {"otlp": {"enabled": False, "endpoint": "", "headers_env": {}}},
     },
     "gateway": {  # Gateway settings (messaging platforms: Telegram, Discord, Slack, ...).
+        # macOS LaunchAgent job-root identity (#123118): "osascript" (default) wraps the gateway in
+        # /usr/bin/osascript so macOS Local Network Privacy exempts its sockets from the per-app Local
+        # Network prompt (#71206) — but TCC and the Privacy & Security list then attribute the job to a
+        # bare "osascript" entry, and responsibility-based grants (Calendar, Files & Folders) cannot be
+        # granted to Hermes. "direct" runs the launcher as the job root so permissions attribute to
+        # Hermes, at the cost of that exemption (LAN devices may fail with errno 65 until granted).
+        # Read at plist-generation time, so it survives install/start/refresh/update; unknown values
+        # fall back to "osascript".
+        "launchd_network_identity": "osascript",
         "unmanaged_idle_exit_seconds": 600,  # client-auto-started gateway only; 0 disables
         # Seconds a SIGTERM-interrupted agent unwinds before teardown (short: service stop budgets).
         "signal_interrupt_grace_timeout": 1,

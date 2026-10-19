@@ -7,6 +7,8 @@ intercepting the moved code.
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Mapping
+from typing import Any
 import contextlib
 import json
 import os
@@ -216,7 +218,48 @@ def _gateway_run_command() -> list[str]:
                            python=_gw().get_python_path())
 
 
-def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: Path) -> list[str]:
+#: ``gateway.launchd_network_identity`` values. ``osascript`` (default) keeps the Local Network
+#: Privacy wrapper (#71206); ``direct`` runs the gateway as the launchd job root so TCC and the
+#: Privacy & Security UI attribute the job to Hermes (#123118). Anything else is ignored.
+LAUNCHD_NETWORK_IDENTITIES = ("osascript", "direct")
+DEFAULT_LAUNCHD_NETWORK_IDENTITY = "osascript"
+_MISSING = object()
+
+
+def configured_launchd_network_identity(config: Mapping[str, Any] | None = None) -> str:
+    """``gateway.launchd_network_identity`` — which program the LaunchAgent names as its job root.
+
+    ``osascript`` (default) runs the gateway behind the ``/usr/bin/osascript`` JXA wrapper so
+    macOS Local Network Privacy exempts its sockets from the per-app Local Network prompt
+    (#71206). Because TCC and the Privacy & Security list attribute a job to the process launchd
+    spawned, that wrapper also makes every Hermes permission entry show as a bare ``osascript``
+    and breaks responsibility-based grants (Calendar, Files & Folders) — the symptom reported in
+    #123118. ``direct`` makes the gateway launcher itself the job root so attribution is Hermes,
+    at the cost of the Local Network exemption (LAN devices may fail with ``errno 65`` until
+    granted). The selection is read at plist-generation time, so it survives install/start/
+    refresh/update regeneration. Unknown or malformed values fall back to ``osascript`` — never
+    silently drop the network identity.
+    """
+    if config is None:
+        try:
+            # Profile-aware loader (applies managed-scope overlays and defaults).
+            from hermes_cli.config import load_config_readonly
+            config = load_config_readonly()
+        except Exception:
+            return DEFAULT_LAUNCHD_NETWORK_IDENTITY
+    if not isinstance(config, Mapping):
+        return DEFAULT_LAUNCHD_NETWORK_IDENTITY
+    gateway = config.get("gateway", _MISSING)
+    if gateway is _MISSING or not isinstance(gateway, Mapping):
+        return DEFAULT_LAUNCHD_NETWORK_IDENTITY
+    value = gateway.get("launchd_network_identity", DEFAULT_LAUNCHD_NETWORK_IDENTITY)
+    if not isinstance(value, str) or value not in LAUNCHD_NETWORK_IDENTITIES:
+        return DEFAULT_LAUNCHD_NETWORK_IDENTITY
+    return value
+
+
+def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: Path,
+                              network_identity: str = DEFAULT_LAUNCHD_NETWORK_IDENTITY) -> list[str]:
     """launchd ``ProgramArguments`` that run ``command`` with a Local Network identity macOS accepts (#71206).
 
     macOS Local Network Privacy attributes a socket to the process launchd spawned for the job. A bare
@@ -236,7 +279,16 @@ def launchd_program_arguments(command: list[str], stdout_log: Path, stderr_log: 
     bootout`` / ``kickstart -k`` still deliver SIGTERM to it. stdout/stderr are appended inside the shell
     command because ``system()`` otherwise inherits osascript's plist log handles. The encoded wait status
     is translated back to a process exit code so KeepAlive's ``SuccessfulExit`` semantics are preserved.
+
+    ``network_identity="direct"`` skips the wrapper entirely: the launcher is the job root, so TCC and
+    Privacy & Security attribute the job to Hermes instead of a bare ``osascript`` (#123118). The trade-off
+    is the loss of the Local Network exemption above, which is why ``osascript`` stays the default; the
+    caller (plist generation) resolves the mode from ``gateway.launchd_network_identity``.
     """
+    if network_identity == "direct":
+        # launchd's StandardOutPath/StandardErrorPath carry stdout/stderr directly — no shell
+        # redirection is needed, and the launcher stays the job's TCC attribution identity.
+        return list(command)
     shell = f"exec {shlex.join(command)} >> {shlex.quote(str(stdout_log))} 2>> {shlex.quote(str(stderr_log))}"
     javascript = (
         'ObjC.import("stdlib"); '
@@ -367,10 +419,14 @@ def generate_launchd_plist() -> str:
 
     # ProgramArguments (incl. --profile); the stderr wrapper keeps launchd restart semantics while timestamping
     # stderr; the osascript wrapper gives the job a Local Network identity (see launchd_program_arguments).
+    # gateway.launchd_network_identity: direct swaps the wrapper for the launcher itself so TCC/Privacy
+    # & Security attribute the job to Hermes (#123118), at the cost of the Local Network exemption (#71206).
     stdout_log, stderr_log = log_dir / "gateway.log", log_dir / "gateway.error.log"
     command = _timestamped_stderr_gateway_command(stderr_log, external_supervisor=True)
     prog_args_xml = "\n        ".join(
-        f"<string>{escape(part)}</string>" for part in launchd_program_arguments(command, stdout_log, stderr_log)
+        f"<string>{escape(part)}</string>" for part in launchd_program_arguments(
+            command, stdout_log, stderr_log, network_identity=configured_launchd_network_identity()
+        )
     )
 
     # Persist the configured RLIMIT_NOFILE floor: launchd defaults to soft 256, and every plist
