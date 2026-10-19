@@ -1,0 +1,43 @@
+name: Security Evidence Gate
+
+# Consumes security/evidence-ledger.json and refuses an unqualified pass when a required
+# control's evidence is failed, unknown, missing, stale, or unverifiable against this
+# checkout (#92618 acceptance criterion 7). `unknown` stays first-class — a recorded gap
+# (e.g. no pentest receipt yet) is reported, never promoted to pass.
+#
+# Path-filtered: it only runs when the ledger, the gate, or its tests change, so it never
+# burns a lane on unrelated PRs. Runs on main pushes too so a merged edit that invalidates
+# an old row surfaces immediately rather than at release time.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'security/**'
+      - 'scripts/ci/security_evidence_gate.py'
+      - 'tests/ci/test_security_evidence_gate.py'
+      - '.github/workflows/security-evidence.yml'
+  pull_request:
+    paths:
+      - 'security/**'
+      - 'scripts/ci/security_evidence_gate.py'
+      - 'tests/ci/test_security_evidence_gate.py'
+      - '.github/workflows/security-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence-gate:
+    name: Security evidence ledger gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        with:
+          persist-credentials: false
+      - name: Evaluate the evidence ledger against this checkout
+        run: python3 scripts/ci/security_evidence_gate.py
+      - name: Gate behavior tests
+        run: python3 -m pytest tests/ci/test_security_evidence_gate.py -q -p no:randomly
