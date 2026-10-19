@@ -126,6 +126,35 @@ class TestScanContent:
         )
         assert "react_dangerously_set_html" in [n for n, _ in findings]
 
+    # Six JS/DOM rules must be gated to JavaScript/TS file types (issue #124562).
+    _SIX_JS_DOM_RULES = (
+        "new_function_injection",
+        "react_dangerously_set_html",
+        "document_write_xss",
+        "innerHTML_xss",
+        "outerHTML_xss",
+        "insertAdjacentHTML_xss",
+    )
+    _SIX_JS_DOM_SNIPPET = (
+        "new Function; dangerouslySetInnerHTML; document.write; "
+        "x.innerHTML = input; x.outerHTML = input; x.insertAdjacentHTML("
+    )
+
+    @pytest.mark.parametrize("path", ["docs/example.md", "script.py"])
+    def test_js_dom_rules_do_not_fire_on_prose_or_python(self, path):
+        """Merely documenting these APIs in Markdown/Python must not warn."""
+        mod = _load_plugin_init()
+        names = [n for n, _ in mod._scan_content(path, self._SIX_JS_DOM_SNIPPET)]
+        leaked = [r for r in self._SIX_JS_DOM_RULES if r in names]
+        assert leaked == [], f"JS/DOM rules fired on {path}: {leaked}"
+
+    @pytest.mark.parametrize("path", ["client.js", "client.tsx"])
+    def test_js_dom_rules_still_fire_on_js_ts(self, path):
+        mod = _load_plugin_init()
+        names = [n for n, _ in mod._scan_content(path, self._SIX_JS_DOM_SNIPPET)]
+        missed = [r for r in self._SIX_JS_DOM_RULES if r not in names]
+        assert missed == [], f"JS/DOM rules missed on {path}: {missed}"
+
     def test_github_workflow_path_check_fires_on_path_alone(self):
         """github_actions_workflow has no regex/substring — fires on path."""
         mod = _load_plugin_init()
